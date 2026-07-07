@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<index version="1" name="My REAPER Scripts Repository" Amp="true">
+  <category name="MIDI">
+    <reapack name="Generate_Chord_Track.lua" type="script" desc="Generate a visual chord track from any MIDI item with smart inversion and dyad detection.">
+      <version name="1.2" author="Open Source Contributor" time="2026-07-07T12:00:00Z">
+        <source main="main">https://github.com/Dagniele/ReaScripts/raw/main/midi/Generate_Chord_Track.lua</source>
+      </version>
+    </reapack>
+  </category>
+</index>
+

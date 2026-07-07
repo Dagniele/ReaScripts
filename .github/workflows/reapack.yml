@@ -1,0 +1,51 @@
+name: Update ReaPack Index
+
+on:
+  push:
+    branches:
+      - main # Cambia in 'master' se il tuo branch principale si chiama così
+    paths:
+      - '**.lua'
+      - '**.eel'
+      - '**.jsfx'
+  workflow_dispatch: # Ti permette di avviare l'azione anche manualmente da GitHub
+
+# Fornisce al bot i permessi per fare il push del file generato
+permissions:
+  contents: write
+
+jobs:
+  reapack-index:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Fondamentale: permette a reapack-index di leggere l'albero dei commit
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.2'
+
+      - name: Install reapack-index
+        run: gem install reapack-index
+
+      - name: Setup Git User
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Build index and Commit
+        run: |
+          # Genera il file index.xml. Puoi personalizzare il nome tra le virgolette.
+          reapack-index --rebuild --name "My REAPER Scripts Repository"
+          
+          git add index.xml
+          
+          # Fa il commit solo se il file index.xml è stato effettivamente modificato
+          # L'etichetta [skip ci] evita che il push inneschi un loop infinito della Action
+          git diff-index --quiet HEAD || git commit -m "Auto-update index.xml [skip ci]"
+
+      - name: Push changes
+        run: git push
