@@ -1,5 +1,5 @@
 -- @description Generate chord track from MIDI item (Smart Dictionary with Inversions & Dyads)
--- @version 1.2
+-- @version 1.3
 -- @author Open Source Contributor
 -- @provides chord_dictionary.lua
 -- @about
