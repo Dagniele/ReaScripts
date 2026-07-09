@@ -42,7 +42,7 @@ jobs:
       - name: Build index and Commit
         run: |
           # Genera il file index.xml. Puoi personalizzare il nome tra le virgolette.
-          reapack-index --rebuild --name "My REAPER Scripts Repository"
+          reapack-index --rebuild --name "Generate Chord Track" --commit
           
           git add index.xml
           
