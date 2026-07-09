@@ -1,3 +1,7 @@
+-- @noindex
+-- chord_dictionary.lua
+-- Add new interval mappings here (intervals are calculated as semitones from the lowest note % 12)
+
 -- Smart Dictionary (Modulo 12)
 -- 'suffix' is the chord type.
 -- 'offset' is the number of semitones to add to the bass note to find the true root.
