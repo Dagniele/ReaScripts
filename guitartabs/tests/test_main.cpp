@@ -97,6 +97,22 @@ int main() {
   CHECK(std::find(singleNotes.begin(), singleNotes.end(), 40) != singleNotes.end());
   CHECK(std::find(singleNotes.begin(), singleNotes.end(), 52) == singleNotes.end());
 
+  const auto bright = tone(kRate, 1.2, {{82.4069, 0.35f}, {164.8138, 0.55f}, {247.2196, 0.4f}, {329.6276, 0.28f}, {412.305f, 0.16f}});
+  const std::vector<int> brightNotes = guitartabs::detectMidis(bright.data(), static_cast<int>(bright.size()), kRate, 36, 84, 6);
+  if (brightNotes.size() != 1 || (brightNotes.size() == 1 && brightNotes[0] != 40)) {
+    std::cerr << "bright single pitches:";
+    for (int note : brightNotes) std::cerr << " " << note;
+    std::cerr << "\n";
+  }
+  CHECK(brightNotes.size() == 1);
+  CHECK(!brightNotes.empty() && brightNotes[0] == 40);
+
+  const auto triad = tone(kRate, 1.2, {{82.4069, 0.42f}, {103.8262, 0.36f}, {123.4708, 0.34f}});
+  const std::vector<int> triadNotes = guitartabs::detectMidis(triad.data(), static_cast<int>(triad.size()), kRate, 36, 72, 6);
+  CHECK(std::find(triadNotes.begin(), triadNotes.end(), 40) != triadNotes.end());
+  CHECK(std::find(triadNotes.begin(), triadNotes.end(), 44) != triadNotes.end());
+  CHECK(std::find(triadNotes.begin(), triadNotes.end(), 47) != triadNotes.end());
+
   guitartabs::TranscribeRequest request;
   request.samples = dyad.data();
   request.sampleCount = static_cast<int>(dyad.size());
@@ -123,6 +139,50 @@ int main() {
     std::cerr << "\n";
   }
   CHECK(voiced);
+
+  std::vector<float> riff(static_cast<size_t>(kRate));
+  for (int i = 0; i < kRate; ++i) {
+    const double time = static_cast<double>(i) / kRate;
+    const float lowE = 0.34f * std::sin(2.0 * M_PI * 82.4069 * time) + 0.48f * std::sin(2.0 * M_PI * 164.8138 * time) +
+                       0.3f * std::sin(2.0 * M_PI * 247.2196 * time);
+    float sample = lowE;
+    if (time >= 0.5) {
+      sample += 0.4f * std::sin(2.0 * M_PI * 110.0 * time) + 0.42f * std::sin(2.0 * M_PI * 220.0 * time) +
+                0.22f * std::sin(2.0 * M_PI * 330.0 * time);
+    }
+    riff[static_cast<size_t>(i)] = sample;
+  }
+  guitartabs::TranscribeRequest riffRequest;
+  riffRequest.samples = riff.data();
+  riffRequest.sampleCount = static_cast<int>(riff.size());
+  riffRequest.sampleRate = kRate;
+  riffRequest.tuning = standard;
+  riffRequest.cellQn = {0, 0.5};
+  riffRequest.cellTime = {0, 0.5};
+  riffRequest.cellDuration = {0.5, 0.5};
+  riffRequest.cellQnDuration = {0.5, 0.5};
+  const auto riffEvents = guitartabs::transcribe(riffRequest, nullptr);
+  auto voices = [](const guitartabs::TabEvent& event) {
+    int count = 0;
+    for (int fret : event.frets)
+      if (fret >= 0) ++count;
+    return count;
+  };
+  if (riffEvents.size() < 2 || voices(riffEvents[0]) != 1 || voices(riffEvents[1]) != 1) {
+    std::cerr << "riff frets:";
+    for (const auto& event : riffEvents) {
+      std::cerr << " [";
+      for (int fret : event.frets) std::cerr << fret << " ";
+      std::cerr << "]";
+    }
+    std::cerr << "\n";
+  }
+  CHECK(riffEvents.size() >= 2);
+  CHECK(voices(riffEvents[0]) == 1);
+  CHECK(voices(riffEvents[1]) == 1);
+  CHECK(riffEvents[0].frets[0] == 0);
+  const bool newPitch = riffEvents[1].frets[0] == 5 || (riffEvents[1].frets.size() > 1 && riffEvents[1].frets[1] == 0);
+  CHECK(newPitch);
 
   if (g_failures) {
     std::cerr << g_failures << " failed\n";

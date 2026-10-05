@@ -4,11 +4,21 @@ import { midiName } from "./theory.js";
 const GUTTER = 78;
 const RULER = 36;
 
-export default function TabView({ doc, map, transportRef, follow, pxPerQn, onCell, onManualScroll }) {
+function modifierMask(event) {
+  let mask = 0;
+  if (event.shiftKey) mask |= 1;
+  if (event.metaKey) mask |= 2;
+  if (event.altKey) mask |= 4;
+  if (event.ctrlKey) mask |= 8;
+  return mask;
+}
+
+export default function TabView({ doc, map, transportRef, follow, pxPerQn, selected, selectFlags, onCell, onSelect, onManualScroll }) {
   const canvasRef = useRef(null);
   const scrollRef = useRef(0);
   const hoverRef = useRef(null);
   const dragRef = useRef(null);
+  const bandRef = useRef(null);
   const layoutRef = useRef({ top: 80, gap: 34 });
 
   useEffect(() => {
@@ -119,15 +129,23 @@ export default function TabView({ doc, map, transportRef, follow, pxPerQn, onCel
           const attack = (event.a || 0) & (1 << string);
           const prior = previous[string];
           const sustained = prior && prior.fret === fret && Math.abs(prior.qn + prior.d - event.qn) < 1e-2 && !attack;
+          const chosen = (selected || []).some((note) => note.string === string && Math.abs(note.qn - event.qn) < 1e-3);
           if (sustained) {
-            ctx.fillStyle = "rgba(243,239,230,0.78)";
-            ctx.fillRect(x - 7, y - 1.25, 14, 2.5);
+            ctx.fillStyle = chosen ? "#e36a3a" : "rgba(243,239,230,0.78)";
+            ctx.fillRect(x - 7, y - 1.25, 14, chosen ? 3.5 : 2.5);
           } else {
             ctx.fillStyle = "rgba(12,14,18,0.86)";
             ctx.beginPath();
             ctx.arc(x, y, 11, 0, Math.PI * 2);
             ctx.fill();
-            ctx.fillStyle = "#f6f1e7";
+            if (chosen) {
+              ctx.strokeStyle = "#e36a3a";
+              ctx.lineWidth = 2;
+              ctx.beginPath();
+              ctx.arc(x, y, 13, 0, Math.PI * 2);
+              ctx.stroke();
+            }
+            ctx.fillStyle = chosen ? "#e36a3a" : "#f6f1e7";
             ctx.font = "600 13px SF Mono, ui-monospace, Menlo, monospace";
             ctx.textAlign = "center";
             ctx.textBaseline = "middle";
@@ -189,11 +207,22 @@ export default function TabView({ doc, map, transportRef, follow, pxPerQn, onCel
         ctx.textAlign = "right";
         ctx.fillText(midiName(tuning[string] ?? 40), GUTTER - 12, y);
       }
+
+      const band = bandRef.current;
+      if (band) {
+        const x = Math.min(band.x0, band.x1);
+        const y = Math.min(band.y0, band.y1);
+        ctx.fillStyle = "rgba(227,106,58,0.14)";
+        ctx.strokeStyle = "rgba(227,106,58,0.9)";
+        ctx.lineWidth = 1;
+        ctx.fillRect(x, y, Math.abs(band.x1 - band.x0), Math.abs(band.y1 - band.y0));
+        ctx.strokeRect(x, y, Math.abs(band.x1 - band.x0), Math.abs(band.y1 - band.y0));
+      }
     };
 
     frame = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(frame);
-  }, [doc, map, follow, pxPerQn, transportRef]);
+  }, [doc, map, follow, pxPerQn, transportRef, selected]);
 
   function locate(event) {
     const rect = canvasRef.current.getBoundingClientRect();
@@ -211,6 +240,46 @@ export default function TabView({ doc, map, transportRef, follow, pxPerQn, onCel
     };
   }
 
+  function selectsMultiple(event) {
+    const mask = modifierMask(event);
+    if (!mask) return false;
+    const flags = selectFlags?.length ? selectFlags : [2];
+    return flags.includes(mask);
+  }
+
+  function noteAt(hit) {
+    if (!hit) return null;
+    const step = 4 / (doc?.division || 8);
+    const found = doc?.events?.find((item) => Math.abs(item.qn - hit.qn) < step * 0.25);
+    const fret = found?.f?.[hit.string];
+    if (!found || fret == null || fret < 0) return null;
+    return { qn: found.qn, string: hit.string };
+  }
+
+  function notesInside(x0, y0, x1, y1) {
+    const left = Math.min(x0, x1) - 8;
+    const right = Math.max(x0, x1) + 8;
+    const topEdge = Math.min(y0, y1) - 8;
+    const bottom = Math.max(y0, y1) + 8;
+    const { top, gap, strings } = layoutRef.current;
+    const notes = [];
+    for (const item of doc?.events || []) {
+      for (let string = 0; string < strings; string += 1) {
+        const fret = item.f?.[string];
+        if (fret == null || fret < 0) continue;
+        const x = GUTTER - scrollRef.current + item.qn * pxPerQn + (item.d * pxPerQn) / 2;
+        const y = top + (strings - 1 - string) * gap;
+        if (x >= left && x <= right && y >= topEdge && y <= bottom) notes.push({ qn: item.qn, string });
+      }
+    }
+    return notes;
+  }
+
+  function canvasPoint(event) {
+    const rect = canvasRef.current.getBoundingClientRect();
+    return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+  }
+
   return (
     <canvas
       ref={canvasRef}
@@ -221,7 +290,19 @@ export default function TabView({ doc, map, transportRef, follow, pxPerQn, onCel
         onManualScroll();
       }}
       onPointerDown={(event) => {
-        dragRef.current = { x: event.clientX, scroll: scrollRef.current, moved: false };
+        if (event.button !== 0) return;
+        const point = canvasPoint(event);
+        const multi = selectsMultiple(event);
+        dragRef.current = {
+          x: event.clientX,
+          y: event.clientY,
+          scroll: scrollRef.current,
+          moved: false,
+          multi,
+          originX: point.x,
+          originY: point.y,
+        };
+        if (multi) event.preventDefault();
         event.currentTarget.setPointerCapture(event.pointerId);
       }}
       onPointerMove={(event) => {
@@ -230,7 +311,15 @@ export default function TabView({ doc, map, transportRef, follow, pxPerQn, onCel
         const drag = dragRef.current;
         if (!drag) return;
         const dx = event.clientX - drag.x;
-        if (Math.abs(dx) > 4) drag.moved = true;
+        const dy = event.clientY - drag.y;
+        if (Math.abs(dx) > 4 || Math.abs(dy) > 4) drag.moved = true;
+        if (drag.multi) {
+          if (drag.moved) {
+            const point = canvasPoint(event);
+            bandRef.current = { x0: drag.originX, y0: drag.originY, x1: point.x, y1: point.y };
+          }
+          return;
+        }
         if (drag.moved) {
           scrollRef.current = drag.scroll - dx;
           onManualScroll();
@@ -239,6 +328,17 @@ export default function TabView({ doc, map, transportRef, follow, pxPerQn, onCel
       onPointerUp={(event) => {
         const drag = dragRef.current;
         dragRef.current = null;
+        bandRef.current = null;
+        if (drag?.multi) {
+          if (!drag.moved) {
+            const note = noteAt(locate(event));
+            if (note) onSelect({ type: "toggle", ...note });
+          } else {
+            const point = canvasPoint(event);
+            onSelect({ type: "marquee", notes: notesInside(drag.originX, drag.originY, point.x, point.y) });
+          }
+          return;
+        }
         if (drag?.moved) return;
         const hit = locate(event);
         if (hit) onCell(hit, event.clientX, event.clientY);

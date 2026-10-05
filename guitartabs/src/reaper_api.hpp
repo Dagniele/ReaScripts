@@ -26,6 +26,8 @@
 #define REAPERAPI_WANT_GetProjExtState
 #define REAPERAPI_WANT_MarkProjectDirty
 #define REAPERAPI_WANT_ValidatePtr2
+#define REAPERAPI_WANT_GetMouseModifier
+#define REAPERAPI_WANT_kbd_getTextFromCmd
 
 #include "reaper_plugin.h"
 #include "reaper_plugin_functions.h"

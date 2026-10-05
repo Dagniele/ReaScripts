@@ -91,6 +91,7 @@ function seed() {
     trackGuid: "demo",
     presetList: list(6),
     alive: true,
+    selectFlags: [2],
   };
 }
 
@@ -181,8 +182,7 @@ export function demoDispatch(message) {
       if (fret < 0) continue;
       const frets = Array(state.strings).fill(-1);
       frets[0] = fret;
-      if (state.strings > 1 && fret > 0) frets[1] = Math.max(0, fret - 2);
-      state.events.push({ qn, d: step, f: frets, a: 0b11 });
+      state.events.push({ qn, d: step, f: frets, a: 1 });
     }
     push();
     handlers.onStatus({ phase: "idle", progress: 1, detail: "Preview transcription" });
@@ -216,6 +216,16 @@ export function demoDispatch(message) {
       else event.a &= ~(1 << message.string);
       if (event.f.every((value) => value < 0)) state.events = state.events.filter((item) => item !== event);
       state.events.sort((a, b) => a.qn - b.qn);
+    }
+  } else if (message.type === "clearCells") {
+    const step = 4 / state.division;
+    for (const cell of message.cells || []) {
+      const qn = Math.floor(cell.qn / step + 1e-6) * step;
+      const event = state.events.find((item) => Math.abs(item.qn - qn) < step * 0.25);
+      if (!event) continue;
+      event.f[cell.string] = -1;
+      event.a &= ~(1 << cell.string);
+      if (event.f.every((value) => value < 0)) state.events = state.events.filter((item) => item !== event);
     }
   } else if (message.type === "clearRange") state.events = [];
   else {

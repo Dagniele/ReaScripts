@@ -13,6 +13,40 @@ function currentFret(doc, qn, stringIndex) {
   return fret >= 0 ? String(fret) : "";
 }
 
+function sameNote(a, b, division) {
+  const step = 4 / (division || 8);
+  return a.string === b.string && Math.abs(a.qn - b.qn) < step * 0.25;
+}
+
+function noteExists(doc, note) {
+  const step = 4 / (doc?.division || 8);
+  const event = doc?.events?.find((item) => Math.abs(item.qn - note.qn) < step * 0.25);
+  const fret = event?.f?.[note.string];
+  return fret != null && fret >= 0;
+}
+
+function modifierLabel(flags) {
+  const list = flags?.length ? [...flags] : [2];
+  list.sort((a, b) => bitCount(a) - bitCount(b) || a - b);
+  const flag = list[0];
+  const parts = [];
+  if (flag & 1) parts.push("⇧");
+  if (flag & 2) parts.push("⌘");
+  if (flag & 4) parts.push("⌥");
+  if (flag & 8) parts.push("⌃");
+  return parts.join("") || "⌘";
+}
+
+function bitCount(value) {
+  let count = 0;
+  let bits = value;
+  while (bits) {
+    count += bits & 1;
+    bits >>= 1;
+  }
+  return count;
+}
+
 export default function App() {
   const [doc, setDoc] = useState(null);
   const [map, setMap] = useState({ measures: [], endQn: 16 });
@@ -24,6 +58,7 @@ export default function App() {
   const [tuningOpen, setTuningOpen] = useState(false);
   const [follow, setFollow] = useState(true);
   const [pxPerQn, setPxPerQn] = useState(72);
+  const [selected, setSelected] = useState([]);
   const transportRef = useRef(null);
   const mapRef = useRef(map);
   const footerKey = useRef("");
@@ -50,15 +85,33 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    setSelected((current) => {
+      const next = current.filter((note) => noteExists(doc, note));
+      return next.length === current.length ? current : next;
+    });
+  }, [doc]);
+
+  useEffect(() => {
     const onKey = (event) => {
+      if (event.repeat) return;
+      const target = event.target;
+      const typing = target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT");
       const meta = event.metaKey || event.ctrlKey;
-      if (!meta || event.key.toLowerCase() !== "z") return;
-      event.preventDefault();
-      post({ type: event.shiftKey ? "redo" : "undo" });
+      if (meta && event.key.toLowerCase() === "z") {
+        event.preventDefault();
+        post({ type: event.shiftKey ? "redo" : "undo" });
+        return;
+      }
+      if (typing || editor) return;
+      if ((event.key === "Backspace" || event.key === "Delete") && selected.length) {
+        event.preventDefault();
+        post({ type: "clearCells", cells: selected });
+        setSelected([]);
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [editor, selected]);
 
   const place = useMemo(() => barBeat(transport?.playQn || 0, map.measures), [transport, map.measures]);
   const busy = status.phase === "reading" || status.phase === "detecting";
@@ -189,8 +242,23 @@ export default function App() {
           transportRef={transportRef}
           follow={follow}
           pxPerQn={pxPerQn}
+          selected={selected}
+          selectFlags={doc?.selectFlags}
           onManualScroll={() => setFollow(false)}
+          onSelect={(action) => {
+            setEditor(null);
+            if (action.type === "toggle") {
+              setSelected((current) => {
+                const exists = current.some((note) => sameNote(note, action, doc?.division));
+                if (exists) return current.filter((note) => !sameNote(note, action, doc?.division));
+                return [...current, { qn: action.qn, string: action.string }];
+              });
+              return;
+            }
+            setSelected(action.notes || []);
+          }}
           onCell={(hit, x, y) => {
+            setSelected([]);
             setEditor({ ...hit, x: Math.min(x, window.innerWidth - 220), y: Math.min(y, window.innerHeight - 180) });
             setDraft(currentFret(doc, hit.qn, hit.string));
           }}
@@ -208,7 +276,7 @@ export default function App() {
           {doc ? `${doc.strings} strings · ${doc.preset}` : ""}
         </div>
         <div className={status.phase === "error" || status.phase === "empty" ? "status-pill warn" : "status-pill"}>
-          {status.detail || "Click a cell and type a fret. ⌘Z undoes."}
+          {status.detail || `${modifierLabel(doc?.selectFlags)}-click selects notes. Delete removes them. ⌘Z undoes.`}
         </div>
       </footer>
       {confirm && (

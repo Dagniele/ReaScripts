@@ -6,7 +6,9 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <mutex>
 #include <stdexcept>
 #include <unordered_map>
@@ -83,6 +85,43 @@ bool selectionRange(void* project, double& start, double& end) {
   end = 0;
   GetSet_LoopTimeRange2(static_cast<ReaProject*>(project), false, false, &start, &end, false);
   return end > start + 1e-4;
+}
+
+bool namesMultiSelect(const std::string& action) {
+  std::string lower = action;
+  for (char& ch : lower) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+  if (lower.find("toggle item selection") != std::string::npos) return true;
+  if (lower.find("add item") != std::string::npos && lower.find("selection") != std::string::npos) return true;
+  if (lower.find("leaving other items selected") != std::string::npos) return true;
+  return false;
+}
+
+bool actionSelectsMultiple(const char* action) {
+  if (!action || action[0] == 0) return false;
+  const std::string text = action;
+  if (text.size() >= 2 && text.compare(text.size() - 2, 2, " m") == 0) {
+    const int id = std::atoi(text.c_str());
+    return id >= 7 && id <= 22;
+  }
+  if (text.size() >= 2 && text.compare(text.size() - 2, 2, " c") == 0) {
+    const int command = std::atoi(text.c_str());
+    const char* name = kbd_getTextFromCmd ? kbd_getTextFromCmd(command, nullptr) : nullptr;
+    return name && namesMultiSelect(name);
+  }
+  return namesMultiSelect(text);
+}
+
+std::vector<int> multiSelectFlags() {
+  std::vector<int> flags;
+  if (GetMouseModifier) {
+    for (int flag = 1; flag <= 15; ++flag) {
+      char action[320] = {};
+      GetMouseModifier("MM_CTX_ITEM_CLK", flag, action, static_cast<int>(sizeof(action)));
+      if (actionSelectsMultiple(action)) flags.push_back(flag);
+    }
+  }
+  if (flags.empty()) flags.push_back(2);
+  return flags;
 }
 
 Json measureMap(void* project, const TabDocument& doc) {
@@ -204,6 +243,9 @@ void Session::pushState() {
   state.set("trackGuid", Json::string(guid_));
   state.set("presetList", presetsJson(doc_.stringCount));
   state.set("alive", Json::boolean(resolveTrack() != nullptr));
+  Json flags = Json::array();
+  for (int flag : multiSelectFlags()) flags.push(Json::number(flag));
+  state.set("selectFlags", std::move(flags));
   emit("gtApplyState", state);
 }
 
@@ -327,6 +369,12 @@ void Session::onMessage(const std::string& text) {
     changed = doc_.setCell(message.number("qn", 0), message.integer("string", -1), message.integer("fret", -1));
   } else if (type == "clearCell") {
     changed = doc_.setCell(message.number("qn", 0), message.integer("string", -1), -1);
+  } else if (type == "clearCells") {
+    if (const std::vector<Json>* cells = message.array("cells")) {
+      for (const Json& cell : *cells) {
+        if (doc_.setCell(cell.number("qn", 0), cell.integer("string", -1), -1)) changed = true;
+      }
+    }
   } else if (type == "clearRange") {
     auto* proj = static_cast<ReaProject*>(project_);
     double start = 0;

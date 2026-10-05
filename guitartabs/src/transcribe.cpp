@@ -51,21 +51,45 @@ int chooseFftSize(const std::vector<int>& tuning, double medianDuration) {
   return 4096;
 }
 
-std::vector<float> spectrum(const float* samples, int sampleCount, int center, int fftSize) {
+std::vector<float> spectrumSpan(const float* samples, int sampleCount, int start, int end, int fftSize) {
+  start = std::clamp(start, 0, sampleCount);
+  end = std::clamp(end, start, sampleCount);
+  int readStart = start;
+  int readCount = end - start;
+  if (readCount > fftSize) {
+    readStart += (readCount - fftSize) / 2;
+    readCount = fftSize;
+  }
   std::vector<std::complex<float>> data(static_cast<size_t>(fftSize));
-  const int start = center - fftSize / 2;
-  for (int i = 0; i < fftSize; ++i) {
-    const int index = start + i;
-    const float window = 0.5f - 0.5f * std::cos(2.f * kPi * static_cast<float>(i) / static_cast<float>(fftSize - 1));
-    float sample = 0;
-    if (index >= 0 && index < sampleCount) sample = samples[index];
-    data[static_cast<size_t>(i)] = sample * window;
+  const int denom = std::max(1, readCount - 1);
+  for (int i = 0; i < readCount; ++i) {
+    const float window = 0.5f - 0.5f * std::cos(2.f * kPi * static_cast<float>(i) / static_cast<float>(denom));
+    data[static_cast<size_t>(i)] = samples[readStart + i] * window;
   }
   fft(data);
   std::vector<float> mag(static_cast<size_t>(fftSize / 2));
-  const float scale = 2.f / static_cast<float>(fftSize);
+  const float scale = 2.f / static_cast<float>(std::max(1, readCount));
   for (int i = 0; i < fftSize / 2; ++i) mag[static_cast<size_t>(i)] = std::abs(data[static_cast<size_t>(i)]) * scale;
   return mag;
+}
+
+std::vector<float> spectrum(const float* samples, int sampleCount, int center, int fftSize) {
+  const int start = center - fftSize / 2;
+  return spectrumSpan(samples, sampleCount, start, start + fftSize, fftSize);
+}
+
+double spectralEnergy(const std::vector<float>& mag) {
+  double sum = 0;
+  for (float value : mag) sum += static_cast<double>(value) * value;
+  return sum;
+}
+
+bool nearHarmonic(int upper, int lower) {
+  if (upper <= lower) return false;
+  const double ratio = midiFrequency(upper) / midiFrequency(lower);
+  const int partial = static_cast<int>(std::lround(ratio));
+  if (partial < 2 || partial > 8) return false;
+  return std::abs(ratio - partial) / static_cast<double>(partial) < 0.035;
 }
 
 std::vector<int> pickNotes(const std::vector<float>& mag, int fftSize, int sampleRate, int low, int high, int maxNotes) {
@@ -91,21 +115,9 @@ std::vector<int> pickNotes(const std::vector<float>& mag, int fftSize, int sampl
     score[static_cast<size_t>(midi - low)] = value;
   }
 
-  // Keep a real octave in a chord, but drop the harmonic of a single lower note.
-  for (int midi = low + 12; midi <= high; ++midi) {
-    const float upper = at(midiFrequency(midi));
-    const float lower = at(midiFrequency(midi - 12));
-    if (lower > 1e-8f && upper < lower * 0.62f) score[static_cast<size_t>(midi - low)] *= 0.18f;
-  }
-  for (int midi = low + 24; midi <= high; ++midi) {
-    const float upper = at(midiFrequency(midi));
-    const float lower = at(midiFrequency(midi - 24));
-    if (lower > 1e-8f && upper < lower * 0.45f) score[static_cast<size_t>(midi - low)] *= 0.18f;
-  }
-
   const float maxScore = *std::max_element(score.begin(), score.end());
   if (maxScore < 1e-8f) return {};
-  const float threshold = maxScore * 0.20f;
+  const float threshold = maxScore * 0.34f;
 
   struct Candidate {
     int midi;
@@ -120,13 +132,34 @@ std::vector<int> pickNotes(const std::vector<float>& mag, int fftSize, int sampl
   }
   std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) { return a.score > b.score; });
 
-  std::vector<int> notes;
+  std::vector<Candidate> kept;
   for (const Candidate& candidate : candidates) {
-    const bool adjacent = std::any_of(notes.begin(), notes.end(), [&](int note) { return std::abs(note - candidate.midi) <= 1; });
+    const bool adjacent = std::any_of(kept.begin(), kept.end(), [&](const Candidate& note) {
+      return std::abs(note.midi - candidate.midi) <= 1;
+    });
     if (adjacent) continue;
-    notes.push_back(candidate.midi);
-    if (static_cast<int>(notes.size()) >= maxNotes) break;
+    const bool harmonic = std::any_of(kept.begin(), kept.end(), [&](const Candidate& note) {
+      return nearHarmonic(candidate.midi, note.midi);
+    });
+    if (harmonic) continue;
+
+    std::vector<Candidate> next;
+    next.reserve(kept.size() + 1);
+    for (const Candidate& note : kept) {
+      if (nearHarmonic(note.midi, candidate.midi) && candidate.score > note.score * 0.35f) continue;
+      next.push_back(note);
+    }
+    next.push_back(candidate);
+    if (static_cast<int>(next.size()) > maxNotes) {
+      std::sort(next.begin(), next.end(), [](const Candidate& a, const Candidate& b) { return a.score > b.score; });
+      next.resize(static_cast<size_t>(maxNotes));
+    }
+    kept = std::move(next);
   }
+
+  std::vector<int> notes;
+  notes.reserve(kept.size());
+  for (const Candidate& note : kept) notes.push_back(note.midi);
   std::sort(notes.begin(), notes.end());
   return notes;
 }
@@ -214,6 +247,8 @@ std::vector<TabEvent> transcribe(const TranscribeRequest& request, std::atomic<f
   const int highMidi = std::min(96, *std::max_element(request.tuning.begin(), request.tuning.end()) + request.maxFret);
 
   std::vector<int> previous(request.tuning.size(), -1);
+  std::vector<int> previousNotes;
+  std::vector<float> previousMag;
   float previousRms = 0;
   const int stringCount = static_cast<int>(request.tuning.size());
 
@@ -221,10 +256,6 @@ std::vector<TabEvent> transcribe(const TranscribeRequest& request, std::atomic<f
     if (progress && cell % 8 == 0) {
       progress->store(static_cast<float>(cell) / static_cast<float>(cells), std::memory_order_relaxed);
     }
-    const double centerTime = request.cellTime[static_cast<size_t>(cell)] + request.cellDuration[static_cast<size_t>(cell)] * 0.5;
-    int center = static_cast<int>(std::llround((centerTime - request.startTime) * request.sampleRate));
-    center = std::clamp(center, 0, request.sampleCount - 1);
-
     const int sliceStart = std::clamp(static_cast<int>((request.cellTime[static_cast<size_t>(cell)] - request.startTime) * request.sampleRate), 0,
                                        request.sampleCount);
     const int sliceEnd = std::clamp(
@@ -235,9 +266,39 @@ std::vector<TabEvent> transcribe(const TranscribeRequest& request, std::atomic<f
 
     std::vector<int> frets(static_cast<size_t>(stringCount), -1);
     if (energy >= gate) {
-      const auto mag = spectrum(request.samples, request.sampleCount, center, fftSize);
-      const std::vector<int> notes = pickNotes(mag, fftSize, request.sampleRate, lowMidi, highMidi, stringCount);
-      frets = assignFrets(notes, request.tuning, request.maxFret);
+      const auto mag = spectrumSpan(request.samples, request.sampleCount, sliceStart, sliceEnd, fftSize);
+      std::vector<float> residual = mag;
+      if (previousMag.size() == mag.size()) {
+        float framePeak = 0;
+        float prevPeak = 0;
+        for (float value : mag) framePeak = std::max(framePeak, value);
+        for (float value : previousMag) prevPeak = std::max(prevPeak, value);
+        const float carry = prevPeak > 1e-8f ? framePeak / prevPeak * 0.85f : 0;
+        for (size_t bin = 0; bin < residual.size(); ++bin) residual[bin] = std::max(0.f, mag[bin] - previousMag[bin] * carry);
+      }
+      const bool sustain = !previousMag.empty() && spectralEnergy(residual) < spectralEnergy(mag) * 0.22 &&
+                           std::any_of(previous.begin(), previous.end(), [](int fret) { return fret >= 0; });
+      if (sustain) {
+        frets = previous;
+      } else {
+        const std::vector<float>& source = previousMag.empty() ? mag : residual;
+        std::vector<int> notes = pickNotes(source, fftSize, request.sampleRate, lowMidi, highMidi, stringCount);
+        if (notes.empty() && &source != &mag) notes = pickNotes(mag, fftSize, request.sampleRate, lowMidi, highMidi, stringCount);
+        if (!previousNotes.empty()) {
+          std::vector<int> fresh;
+          for (int note : notes) {
+            const bool held = std::any_of(previousNotes.begin(), previousNotes.end(), [&](int old) { return std::abs(old - note) <= 1; });
+            if (!held) fresh.push_back(note);
+          }
+          if (!fresh.empty()) notes = std::move(fresh);
+        }
+        frets = assignFrets(notes, request.tuning, request.maxFret);
+        previousNotes = std::move(notes);
+      }
+      previousMag = mag;
+    } else {
+      previousNotes.clear();
+      previousMag.clear();
     }
 
     int attacks = 0;
