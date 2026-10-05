@@ -113,6 +113,42 @@ int main() {
   CHECK(std::find(triadNotes.begin(), triadNotes.end(), 44) != triadNotes.end());
   CHECK(std::find(triadNotes.begin(), triadNotes.end(), 47) != triadNotes.end());
 
+  auto grid = [](const std::vector<double>& times, double duration, const std::vector<int>& tuning) {
+    guitartabs::TranscribeRequest request;
+    request.tuning = tuning;
+    for (double time : times) {
+      request.cellTime.push_back(time);
+      request.cellQn.push_back(time * 2.0);
+      request.cellDuration.push_back(duration);
+      request.cellQnDuration.push_back(duration * 2.0);
+    }
+    return request;
+  };
+  const auto riffTab = guitartabs::tabFromNotes(
+      {{40, 0.0, 0.24, 1.f}, {43, 0.25, 0.49, 1.f}, {45, 0.50, 0.74, 1.f}, {47, 0.75, 0.99, 1.f}},
+      grid({0, 0.25, 0.5, 0.75}, 0.25, standard));
+  CHECK(riffTab.size() == 4);
+  for (int i = 0; i < 4 && riffTab.size() == 4; ++i) {
+    CHECK(riffTab[static_cast<size_t>(i)].frets[0] == std::vector<int>({0, 3, 5, 7})[static_cast<size_t>(i)]);
+    CHECK(std::count_if(riffTab[static_cast<size_t>(i)].frets.begin(), riffTab[static_cast<size_t>(i)].frets.end(), [](int fret) { return fret >= 0; }) == 1);
+  }
+  const auto openTab = guitartabs::tabFromNotes(
+      {{40, 0, 0.5, 1.f}, {47, 0, 0.5, 1.f}, {52, 0, 0.5, 1.f}, {56, 0, 0.5, 1.f}, {59, 0, 0.5, 1.f}, {64, 0, 0.5, 1.f}},
+      grid({0}, 0.5, standard));
+  CHECK(openTab.size() == 1);
+  if (openTab.size() == 1) CHECK(openTab[0].frets == expected);
+  const auto octave = guitartabs::tabFromNotes({{40, 0, 0.24, 1.f}, {52, 0.25, 0.5, 1.f}}, grid({0, 0.25}, 0.25, standard));
+  CHECK(octave.size() == 2);
+  if (octave.size() == 2) CHECK(octave[1].frets[2] == 2);
+  const auto high = guitartabs::tabFromNotes(
+      {{76, 0, 0.24, 1.f}, {74, 0.25, 0.49, 1.f}, {72, 0.5, 0.74, 1.f}}, grid({0, 0.25, 0.5}, 0.25, standard));
+  const int highFrets[] = {12, 10, 8};
+  CHECK(high.size() == 3);
+  for (int i = 0; i < 3 && high.size() == 3; ++i) {
+    CHECK(high[static_cast<size_t>(i)].frets[5] == highFrets[i]);
+    CHECK(std::count_if(high[static_cast<size_t>(i)].frets.begin(), high[static_cast<size_t>(i)].frets.end(), [](int fret) { return fret >= 0; }) == 1);
+  }
+
   guitartabs::TranscribeRequest request;
   request.samples = dyad.data();
   request.sampleCount = static_cast<int>(dyad.size());

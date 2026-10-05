@@ -1,5 +1,6 @@
 #pragma once
 
+#include "basic_pitch.hpp"
 #include "document.hpp"
 
 #include <atomic>
@@ -23,6 +24,8 @@ struct TranscribeRequest {
 std::vector<int> assignFrets(const std::vector<int>& pitches, const std::vector<int>& tuning, int maxFret);
 
 std::vector<int> detectMidis(const float* samples, int count, int sampleRate, int lowMidi, int highMidi, int maxNotes);
+
+std::vector<TabEvent> tabFromNotes(const std::vector<PitchNote>& notes, const TranscribeRequest& request);
 
 std::vector<TabEvent> transcribe(const TranscribeRequest& request, std::atomic<float>* progress);
 

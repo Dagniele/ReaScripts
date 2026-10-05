@@ -5,6 +5,7 @@
 #include <complex>
 #include <functional>
 #include <limits>
+#include <numeric>
 
 namespace guitartabs {
 namespace {
@@ -36,20 +37,6 @@ void fft(std::vector<std::complex<float>>& data) {
 }
 
 double midiFrequency(int midi) { return 440.0 * std::pow(2.0, (midi - 69) / 12.0); }
-
-float frameRms(const float* samples, int count) {
-  if (count <= 0) return 0;
-  double sum = 0;
-  for (int i = 0; i < count; ++i) sum += static_cast<double>(samples[i]) * samples[i];
-  return static_cast<float>(std::sqrt(sum / count));
-}
-
-int chooseFftSize(const std::vector<int>& tuning, double medianDuration) {
-  const int lowest = *std::min_element(tuning.begin(), tuning.end());
-  if (lowest <= 35) return 8192;
-  if (medianDuration < 0.14) return 2048;
-  return 4096;
-}
 
 std::vector<float> spectrumSpan(const float* samples, int sampleCount, int start, int end, int fftSize) {
   start = std::clamp(start, 0, sampleCount);
@@ -212,78 +199,6 @@ std::vector<int> assignFrets(const std::vector<int>& pitches, const std::vector<
   return best;
 }
 
-struct YinPitch {
-  int midi = -1;
-  float cmnd = 1.f;
-};
-
-YinPitch estimateMidi(const float* samples, int count, int sampleRate, int lowMidi, int highMidi) {
-  if (!samples || count < 128 || sampleRate < 1000) return {};
-  const int lowest = std::clamp(lowMidi, 20, 96);
-  const int highest = std::clamp(highMidi, lowest, 108);
-  const int maxTau = std::min(count / 2, static_cast<int>(std::floor(sampleRate / midiFrequency(lowest))));
-  const int minTau = std::max(2, static_cast<int>(std::ceil(sampleRate / midiFrequency(highest))));
-  if (maxTau <= minTau + 2) return {};
-
-  int fftSize = 1;
-  while (fftSize < count * 2) fftSize <<= 1;
-  std::vector<std::complex<float>> spectrumBins(static_cast<size_t>(fftSize));
-  for (int i = 0; i < count; ++i) spectrumBins[static_cast<size_t>(i)] = samples[i];
-  fft(spectrumBins);
-  for (auto& bin : spectrumBins) bin = std::norm(bin);
-  fft(spectrumBins);
-  for (auto& bin : spectrumBins) bin = std::conj(bin);
-  const float scale = 1.f / static_cast<float>(fftSize);
-
-  std::vector<double> prefix(static_cast<size_t>(count) + 1, 0.0);
-  for (int i = 0; i < count; ++i) prefix[static_cast<size_t>(i) + 1] = prefix[static_cast<size_t>(i)] + static_cast<double>(samples[i]) * samples[i];
-
-  std::vector<float> cmnd(static_cast<size_t>(maxTau) + 1, 1.f);
-  double running = 0;
-  int bestTau = -1;
-  for (int tau = 1; tau <= maxTau; ++tau) {
-    const double left = prefix[static_cast<size_t>(count - tau)];
-    const double right = prefix[static_cast<size_t>(count)] - prefix[static_cast<size_t>(tau)];
-    const double correlation = static_cast<double>(spectrumBins[static_cast<size_t>(tau)].real()) * scale;
-    const double difference = std::max(0.0, left + right - 2.0 * correlation);
-    running += difference;
-    cmnd[static_cast<size_t>(tau)] = running > 1e-12 ? static_cast<float>(difference * tau / running) : 1.f;
-    if (tau >= minTau && (bestTau < 0 || cmnd[static_cast<size_t>(tau)] < cmnd[static_cast<size_t>(bestTau)])) bestTau = tau;
-  }
-
-  int tau = -1;
-  for (int candidate = minTau; candidate <= maxTau; ++candidate) {
-    if (cmnd[static_cast<size_t>(candidate)] < 0.15f) {
-      while (candidate + 1 <= maxTau && cmnd[static_cast<size_t>(candidate + 1)] < cmnd[static_cast<size_t>(candidate)]) ++candidate;
-      tau = candidate;
-      break;
-    }
-  }
-  if (tau < 0) {
-    if (bestTau < 0 || cmnd[static_cast<size_t>(bestTau)] > 0.5f) return {};
-    tau = bestTau;
-  }
-
-  float refined = static_cast<float>(tau);
-  if (tau > minTau && tau < maxTau) {
-    const float earlier = cmnd[static_cast<size_t>(tau - 1)];
-    const float here = cmnd[static_cast<size_t>(tau)];
-    const float later = cmnd[static_cast<size_t>(tau + 1)];
-    const float denom = 2.f * (earlier - 2.f * here + later);
-    if (std::abs(denom) > 1e-8f) {
-      const float delta = (earlier - later) / denom;
-      if (std::abs(delta) < 1.f) refined = static_cast<float>(tau) + delta;
-    }
-  }
-  if (refined < 1.f) return {};
-  const double frequency = sampleRate / static_cast<double>(refined);
-  const double midi = 69.0 + 12.0 * std::log2(frequency / 440.0);
-  YinPitch pitch;
-  pitch.cmnd = cmnd[static_cast<size_t>(tau)];
-  pitch.midi = std::clamp(static_cast<int>(std::lround(midi)), lowest, highest);
-  return pitch;
-}
-
 std::vector<int> detectMidis(const float* samples, int count, int sampleRate, int lowMidi, int highMidi, int maxNotes) {
   if (!samples || count < 64 || sampleRate < 1000) return {};
   int fftSize = 4096;
@@ -292,124 +207,288 @@ std::vector<int> detectMidis(const float* samples, int count, int sampleRate, in
   return pickNotes(mag, fftSize, sampleRate, lowMidi, highMidi, maxNotes);
 }
 
-std::vector<TabEvent> transcribe(const TranscribeRequest& request, std::atomic<float>* progress) {
+namespace {
+
+struct Shape {
+  std::vector<int> frets;
+  std::vector<float> amps;
+  double local = 0;
+};
+
+struct Column {
+  double time = 0;
+  std::vector<int> midi;
+  std::vector<float> amp;
+};
+
+int handAnchor(const std::vector<int>& frets) {
+  int low = 100;
+  bool fretted = false;
+  for (int fret : frets) {
+    if (fret <= 0) continue;
+    fretted = true;
+    low = std::min(low, fret);
+  }
+  return fretted ? low : 0;
+}
+
+double localCost(const std::vector<int>& frets) {
+  int low = 99;
+  int high = -1;
+  int minString = 99;
+  int maxString = -1;
+  int voices = 0;
+  double cost = 0;
+  for (int stringIndex = 0; stringIndex < static_cast<int>(frets.size()); ++stringIndex) {
+    const int fret = frets[static_cast<size_t>(stringIndex)];
+    if (fret < 0) continue;
+    ++voices;
+    minString = std::min(minString, stringIndex);
+    maxString = std::max(maxString, stringIndex);
+    cost += fret * 0.25;
+    if (fret > 12) cost += (fret - 12) * 0.9;
+    if (fret > 0) {
+      low = std::min(low, fret);
+      high = std::max(high, fret);
+    }
+  }
+  if (high >= 0) cost += (high - low) * 3.5;
+  if (voices >= 2) cost += std::max(0, (maxString - minString) - (voices - 1)) * 2.5;
+  return cost;
+}
+
+double transitionCost(const std::vector<int>& previous, const std::vector<int>& current, const std::vector<int>& tuning, int maxFret) {
+  double cost = std::abs(handAnchor(current) - handAnchor(previous)) * 0.55;
+  const int strings = static_cast<int>(tuning.size());
+  for (int stringIndex = 0; stringIndex < strings; ++stringIndex) {
+    if (current[static_cast<size_t>(stringIndex)] < 0) continue;
+    const int midi = tuning[static_cast<size_t>(stringIndex)] + current[static_cast<size_t>(stringIndex)];
+    int bestString = -1;
+    int bestInterval = 100;
+    for (int previousString = 0; previousString < strings; ++previousString) {
+      if (previous[static_cast<size_t>(previousString)] < 0) continue;
+      const int interval = std::abs(midi - (tuning[static_cast<size_t>(previousString)] + previous[static_cast<size_t>(previousString)]));
+      if (interval < bestInterval) {
+        bestInterval = interval;
+        bestString = previousString;
+      }
+    }
+    if (bestString < 0) continue;
+    const int stay = midi - tuning[static_cast<size_t>(bestString)];
+    const bool canStay = stay >= 0 && stay <= maxFret;
+    if (stringIndex == bestString) {
+      if (bestInterval <= 7) cost -= 7;
+      else if (bestInterval <= 12) cost -= 2;
+    } else if (canStay && bestInterval <= 7 && std::abs(stay - previous[static_cast<size_t>(bestString)]) <= 12) {
+      cost += 8;
+    }
+  }
+  return cost;
+}
+
+std::vector<Shape> shapesFor(const Column& column, const std::vector<int>& tuning, int maxFret) {
+  const int strings = static_cast<int>(tuning.size());
+  const int count = static_cast<int>(column.midi.size());
+  std::vector<Shape> shapes;
+  int bestPlayed = -1;
+  std::vector<int> current(static_cast<size_t>(strings), -1);
+  std::vector<float> amps(static_cast<size_t>(strings), 0.f);
+  std::vector<char> used(static_cast<size_t>(strings), 0);
+  std::function<void(int, int)> search = [&](int index, int played) {
+    if (played + (count - index) < bestPlayed) return;
+    if (index == count) {
+      if (played > bestPlayed) {
+        bestPlayed = played;
+        shapes.clear();
+      }
+      if (played == bestPlayed) {
+        Shape shape;
+        shape.frets = current;
+        shape.amps = amps;
+        shape.local = localCost(current);
+        shapes.push_back(std::move(shape));
+      }
+      return;
+    }
+    const int pitch = column.midi[static_cast<size_t>(index)];
+    for (int stringIndex = 0; stringIndex < strings; ++stringIndex) {
+      if (used[static_cast<size_t>(stringIndex)]) continue;
+      const int fret = pitch - tuning[static_cast<size_t>(stringIndex)];
+      if (fret < 0 || fret > maxFret) continue;
+      used[static_cast<size_t>(stringIndex)] = 1;
+      current[static_cast<size_t>(stringIndex)] = fret;
+      amps[static_cast<size_t>(stringIndex)] = column.amp[static_cast<size_t>(index)];
+      search(index + 1, played + 1);
+      current[static_cast<size_t>(stringIndex)] = -1;
+      amps[static_cast<size_t>(stringIndex)] = 0.f;
+      used[static_cast<size_t>(stringIndex)] = 0;
+    }
+    search(index + 1, played);
+  };
+  search(0, 0);
+  return shapes;
+}
+
+int cellForTime(const TranscribeRequest& request, double time) {
+  int best = -1;
+  double bestDistance = 1e9;
+  for (int cell = 0; cell < static_cast<int>(request.cellTime.size()); ++cell) {
+    const double start = request.cellTime[static_cast<size_t>(cell)];
+    const double end = start + request.cellDuration[static_cast<size_t>(cell)];
+    if (time < start - 0.03 || time >= end + 0.02) continue;
+    const double distance = std::abs(time - start);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      best = cell;
+    }
+  }
+  return best;
+}
+
+}  // namespace
+
+std::vector<TabEvent> tabFromNotes(const std::vector<PitchNote>& notes, const TranscribeRequest& request) {
   std::vector<TabEvent> events;
   const int cells = static_cast<int>(request.cellQn.size());
-  if (!request.samples || request.sampleCount <= 0 || cells == 0 || request.tuning.empty()) return events;
+  if (cells == 0 || request.tuning.empty() || notes.empty()) return events;
   if (request.cellTime.size() != request.cellQn.size() || request.cellDuration.size() != request.cellQn.size() ||
       request.cellQnDuration.size() != request.cellQn.size()) {
     return events;
   }
 
-  float peak = 0;
-  for (int i = 0; i < request.sampleCount; ++i) peak = std::max(peak, std::abs(request.samples[i]));
-  const float gate = std::max(0.0025f, peak * 0.035f);
+  std::vector<PitchNote> ordered = notes;
+  std::sort(ordered.begin(), ordered.end(), [](const PitchNote& a, const PitchNote& b) {
+    if (a.start != b.start) return a.start < b.start;
+    return a.amplitude > b.amplitude;
+  });
 
-  std::vector<double> durations = request.cellDuration;
-  std::sort(durations.begin(), durations.end());
-  const double medianDuration = durations[durations.size() / 2];
-  const int fftSize = chooseFftSize(request.tuning, medianDuration);
-  const int lowMidi = std::max(20, *std::min_element(request.tuning.begin(), request.tuning.end()) - 2);
-  const int highMidi = std::min(96, *std::max_element(request.tuning.begin(), request.tuning.end()) + request.maxFret);
-
-  std::vector<int> previous(request.tuning.size(), -1);
-  float previousRms = 0;
-  const int stringCount = static_cast<int>(request.tuning.size());
-  const double lowestFrequency = midiFrequency(lowMidi);
-  const int minimumSamples = std::clamp(static_cast<int>(request.sampleRate / lowestFrequency * 4.0), 512, request.sampleRate / 2);
-
-  for (int cell = 0; cell < cells; ++cell) {
-    if (progress && cell % 8 == 0) {
-      progress->store(static_cast<float>(cell) / static_cast<float>(cells), std::memory_order_relaxed);
+  std::vector<Column> columns;
+  for (const PitchNote& note : ordered) {
+    if (columns.empty() || note.start - columns.back().time > 0.045) {
+      columns.push_back(Column{note.start, {note.midi}, {note.amplitude}});
+      continue;
     }
-    const int sliceStart = std::clamp(static_cast<int>((request.cellTime[static_cast<size_t>(cell)] - request.startTime) * request.sampleRate), 0,
-                                       request.sampleCount);
-    const int sliceEnd = std::clamp(
-        static_cast<int>((request.cellTime[static_cast<size_t>(cell)] + request.cellDuration[static_cast<size_t>(cell)] - request.startTime) *
-                         request.sampleRate),
-        sliceStart, request.sampleCount);
-    const float energy = frameRms(request.samples + sliceStart, std::max(1, sliceEnd - sliceStart));
-
-    std::vector<int> frets(static_cast<size_t>(stringCount), -1);
-    if (energy >= gate) {
-      int useStart = sliceStart;
-      int useCount = std::max(0, sliceEnd - sliceStart);
-      const int cap = std::max(minimumSamples, request.sampleRate / 2);
-      if (useCount > cap) {
-        useStart += (useCount - cap) / 2;
-        useCount = cap;
-      } else if (useCount < minimumSamples) {
-        const int center = sliceStart + useCount / 2;
-        useStart = center - minimumSamples / 2;
-        useCount = minimumSamples;
-      }
-      useStart = std::clamp(useStart, 0, request.sampleCount);
-      useCount = std::clamp(useCount, 0, request.sampleCount - useStart);
-
-      const YinPitch pitch = estimateMidi(request.samples + useStart, useCount, request.sampleRate, lowMidi, highMidi);
-      const auto mag = spectrumSpan(request.samples, request.sampleCount, useStart, useStart + useCount, fftSize);
-      std::vector<int> spectral = pickNotes(mag, fftSize, request.sampleRate, lowMidi, highMidi, stringCount);
-      std::vector<int> notes;
-      if (pitch.midi >= 0 && pitch.cmnd < 0.2f) {
-        int fundamental = pitch.midi;
-        for (int extra : spectral) {
-          if (extra < fundamental && nearHarmonic(fundamental, extra)) fundamental = extra;
-        }
-        notes.push_back(fundamental);
-        for (int extra : spectral) {
-          if (std::abs(extra - fundamental) <= 1) continue;
-          if (nearHarmonic(extra, fundamental) || nearHarmonic(fundamental, extra)) continue;
-          notes.push_back(extra);
-          if (notes.size() >= 3) break;
-        }
-      } else if (!spectral.empty()) {
-        notes = std::move(spectral);
-      } else if (pitch.midi >= 0) {
-        notes.push_back(pitch.midi);
-      }
-      frets = assignFrets(notes, request.tuning, request.maxFret);
-      if (notes.size() == 1) {
-        int previousString = -1;
-        int previousFret = -1;
-        for (int stringIndex = 0; stringIndex < stringCount; ++stringIndex) {
-          if (previous[static_cast<size_t>(stringIndex)] < 0) continue;
-          previousString = stringIndex;
-          previousFret = previous[static_cast<size_t>(stringIndex)];
-          break;
-        }
-        if (previousString >= 0) {
-          const int stayed = notes[0] - request.tuning[static_cast<size_t>(previousString)];
-          if (stayed >= 0 && stayed <= request.maxFret && std::abs(stayed - previousFret) <= 12) {
-            std::fill(frets.begin(), frets.end(), -1);
-            frets[static_cast<size_t>(previousString)] = stayed;
-          }
-        }
-      }
+    Column& column = columns.back();
+    const auto existing = std::find(column.midi.begin(), column.midi.end(), note.midi);
+    if (existing != column.midi.end()) {
+      float& amp = column.amp[static_cast<size_t>(existing - column.midi.begin())];
+      amp = std::max(amp, note.amplitude);
+    } else {
+      column.midi.push_back(note.midi);
+      column.amp.push_back(note.amplitude);
     }
-
-    int attacks = 0;
-    const bool onset = energy > previousRms * 1.55f && energy > gate * 1.4f;
-    for (int stringIndex = 0; stringIndex < stringCount; ++stringIndex) {
-      const int fret = frets[static_cast<size_t>(stringIndex)];
-      if (fret < 0) continue;
-      if (cell == 0 || previous[static_cast<size_t>(stringIndex)] != fret || onset) attacks |= 1 << stringIndex;
-    }
-
-    const bool sounding = std::any_of(frets.begin(), frets.end(), [](int fret) { return fret >= 0; });
-    if (sounding) {
-      TabEvent event;
-      event.qn = request.cellQn[static_cast<size_t>(cell)];
-      event.qnDuration = request.cellQnDuration[static_cast<size_t>(cell)];
-      event.frets = frets;
-      event.attacks = attacks;
-      events.push_back(std::move(event));
-    }
-    previous = frets;
-    previousRms = energy;
   }
 
-  if (progress) progress->store(1.f, std::memory_order_relaxed);
+  const int stringCount = static_cast<int>(request.tuning.size());
+  for (Column& column : columns) {
+    if (static_cast<int>(column.midi.size()) <= stringCount) continue;
+    std::vector<int> order(column.midi.size());
+    std::iota(order.begin(), order.end(), 0);
+    std::sort(order.begin(), order.end(), [&](int a, int b) { return column.amp[static_cast<size_t>(a)] > column.amp[static_cast<size_t>(b)]; });
+    order.resize(static_cast<size_t>(stringCount));
+    Column trimmed;
+    trimmed.time = column.time;
+    for (int index : order) {
+      trimmed.midi.push_back(column.midi[static_cast<size_t>(index)]);
+      trimmed.amp.push_back(column.amp[static_cast<size_t>(index)]);
+    }
+    column = std::move(trimmed);
+  }
+
+  struct State {
+    std::vector<int> frets;
+    std::vector<float> amps;
+    double cost = 0;
+    int previous = -1;
+  };
+  std::vector<std::vector<State>> layers;
+  layers.reserve(columns.size());
+  for (const Column& column : columns) {
+    const std::vector<Shape> shapes = shapesFor(column, request.tuning, request.maxFret);
+    if (shapes.empty()) continue;
+    std::vector<State> next;
+    if (layers.empty()) {
+      for (const Shape& shape : shapes) next.push_back(State{shape.frets, shape.amps, shape.local, -1});
+    } else {
+      const std::vector<State>& previous = layers.back();
+      for (int index = 0; index < static_cast<int>(previous.size()); ++index) {
+        for (const Shape& shape : shapes) {
+          const double cost = previous[static_cast<size_t>(index)].cost + shape.local +
+                              transitionCost(previous[static_cast<size_t>(index)].frets, shape.frets, request.tuning, request.maxFret);
+          next.push_back(State{shape.frets, shape.amps, cost, index});
+        }
+      }
+    }
+    std::sort(next.begin(), next.end(), [](const State& a, const State& b) { return a.cost < b.cost; });
+    if (next.size() > 12) next.resize(12);
+    layers.push_back(std::move(next));
+  }
+  if (layers.empty()) return events;
+
+  std::vector<int> chosen(layers.size(), 0);
+  for (int layer = static_cast<int>(layers.size()) - 2; layer >= 0; --layer) {
+    chosen[static_cast<size_t>(layer)] = layers[static_cast<size_t>(layer + 1)][static_cast<size_t>(chosen[static_cast<size_t>(layer + 1)])].previous;
+  }
+
+  struct Accum {
+    std::vector<int> frets;
+    std::vector<float> amps;
+    bool used = false;
+  };
+  std::vector<Accum> placed(static_cast<size_t>(cells));
+  for (Accum& cell : placed) {
+    cell.frets.assign(static_cast<size_t>(stringCount), -1);
+    cell.amps.assign(static_cast<size_t>(stringCount), 0.f);
+  }
+  int layerIndex = 0;
+  for (const Column& column : columns) {
+    const std::vector<Shape> probe = shapesFor(column, request.tuning, request.maxFret);
+    if (probe.empty()) continue;
+    const int cell = cellForTime(request, column.time);
+    const State& state = layers[static_cast<size_t>(layerIndex)][static_cast<size_t>(chosen[static_cast<size_t>(layerIndex)])];
+    ++layerIndex;
+    if (cell < 0) continue;
+    Accum& accum = placed[static_cast<size_t>(cell)];
+    accum.used = true;
+    for (int stringIndex = 0; stringIndex < stringCount; ++stringIndex) {
+      const int fret = state.frets[static_cast<size_t>(stringIndex)];
+      if (fret < 0) continue;
+      const float amp = state.amps[static_cast<size_t>(stringIndex)];
+      if (accum.frets[static_cast<size_t>(stringIndex)] >= 0 && accum.amps[static_cast<size_t>(stringIndex)] >= amp) continue;
+      accum.frets[static_cast<size_t>(stringIndex)] = fret;
+      accum.amps[static_cast<size_t>(stringIndex)] = amp;
+    }
+  }
+
+  for (int cell = 0; cell < cells; ++cell) {
+    const Accum& accum = placed[static_cast<size_t>(cell)];
+    if (!accum.used) continue;
+    if (std::none_of(accum.frets.begin(), accum.frets.end(), [](int fret) { return fret >= 0; })) continue;
+    TabEvent event;
+    event.qn = request.cellQn[static_cast<size_t>(cell)];
+    event.qnDuration = request.cellQnDuration[static_cast<size_t>(cell)];
+    event.frets = accum.frets;
+    for (int stringIndex = 0; stringIndex < stringCount; ++stringIndex) {
+      if (accum.frets[static_cast<size_t>(stringIndex)] >= 0) event.attacks |= 1 << stringIndex;
+    }
+    events.push_back(std::move(event));
+  }
   return events;
+}
+
+std::vector<TabEvent> transcribe(const TranscribeRequest& request, std::atomic<float>* progress) {
+  const int cells = static_cast<int>(request.cellQn.size());
+  if (!request.samples || request.sampleCount <= 0 || cells == 0 || request.tuning.empty()) return {};
+  if (request.cellTime.size() != request.cellQn.size() || request.cellDuration.size() != request.cellQn.size() ||
+      request.cellQnDuration.size() != request.cellQn.size()) {
+    return {};
+  }
+  const int lowMidi = std::max(21, *std::min_element(request.tuning.begin(), request.tuning.end()));
+  const int highMidi = std::min(108, *std::max_element(request.tuning.begin(), request.tuning.end()) + request.maxFret);
+  const std::vector<PitchNote> notes = analyzePitch(request.samples, request.sampleCount, request.sampleRate, lowMidi, highMidi, progress);
+  TranscribeRequest timing = request;
+  for (double& time : timing.cellTime) time -= request.startTime;
+  return tabFromNotes(notes, timing);
 }
 
 }  // namespace guitartabs
