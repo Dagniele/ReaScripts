@@ -1,12 +1,9 @@
 #define REAPERAPI_IMPLEMENT
 #include "reaper_api.hpp"
 #include "session.hpp"
+#include "ui_embed.hpp"
 
-#include <dlfcn.h>
-
-#include <fstream>
 #include <memory>
-#include <sstream>
 #include <string>
 #include <vector>
 
@@ -50,10 +47,7 @@ class Extension {
     }
     const std::string html = loadHtml();
     if (html.empty()) {
-      ShowMessageBox(
-          "Guitar Tabs could not find its interface.\n\nBuild the UI, then keep reaper_guitartabs_ui next to "
-          "reaper_guitartabs.dylib.",
-          "Guitar Tabs", 0);
+      ShowMessageBox("Guitar Tabs was built without its interface.", "Guitar Tabs", 0);
       return;
     }
     ReaProject* project = EnumProjects(-1, nullptr, 0);
@@ -91,36 +85,9 @@ class Extension {
     return nullptr;
   }
 
-  static std::string moduleDirectory() {
-    Dl_info info{};
-    if (dladdr(reinterpret_cast<const void*>(&moduleDirectory), &info) && info.dli_fname) {
-      std::string path = info.dli_fname;
-      const auto slash = path.find_last_of('/');
-      if (slash != std::string::npos) return path.substr(0, slash);
-    }
-    return ".";
-  }
-
-  static std::string readFile(const std::string& path) {
-    std::ifstream input(path);
-    if (!input) return {};
-    std::ostringstream buffer;
-    buffer << input.rdbuf();
-    return buffer.str();
-  }
-
   static std::string loadHtml() {
-    const std::vector<std::string> paths = {
-        moduleDirectory() + "/reaper_guitartabs_ui/index.html",
-#ifdef DAGNIELE_GUITARTABS_UI
-        DAGNIELE_GUITARTABS_UI,
-#endif
-    };
-    for (const std::string& path : paths) {
-      std::string html = readFile(path);
-      if (!html.empty()) return html;
-    }
-    return {};
+    if (kEmbeddedUiSize == 0) return {};
+    return std::string(reinterpret_cast<const char*>(kEmbeddedUi), kEmbeddedUiSize);
   }
 
   custom_action_register_t action_{

@@ -15,7 +15,7 @@ Pitch detection is a prototype. It reads the track pre-FX, estimates pitches on 
 
 ## Build
 
-The UI is bundled into one HTML file, then the extension is compiled.
+The UI is bundled into one HTML file and compiled into the extension, so the installed file is only `reaper_guitartabs.dylib`.
 
 ```bash
 cd guitartabs/ui
@@ -35,11 +35,10 @@ cmake --build build --target guitartabs_tests
 
 ## Install
 
-Copy the extension and the interface folder into REAPER's UserPlugins directory, then restart REAPER:
+Copy the extension into REAPER's UserPlugins directory, then restart REAPER:
 
 ```bash
 cp build/reaper_guitartabs.dylib "$HOME/Library/Application Support/REAPER/UserPlugins/"
-cp -R build/reaper_guitartabs_ui "$HOME/Library/Application Support/REAPER/UserPlugins/"
 ```
 
 Run **Dagniele: Open Guitar Tabs for selected track** from the Actions list. Select several tracks to open one window each. Tab data is stored with the project and restored the next time you open that track.
