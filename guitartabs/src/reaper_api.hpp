@@ -1,0 +1,31 @@
+#pragma once
+
+#define REAPERAPI_MINIMAL
+#define REAPERAPI_WANT_ShowConsoleMsg
+#define REAPERAPI_WANT_ShowMessageBox
+#define REAPERAPI_WANT_CountSelectedTracks
+#define REAPERAPI_WANT_GetSelectedTrack
+#define REAPERAPI_WANT_CountTracks
+#define REAPERAPI_WANT_GetTrack
+#define REAPERAPI_WANT_GetSetMediaTrackInfo_String
+#define REAPERAPI_WANT_GetMediaTrackInfo_Value
+#define REAPERAPI_WANT_EnumProjects
+#define REAPERAPI_WANT_GetSet_LoopTimeRange2
+#define REAPERAPI_WANT_GetProjectLength
+#define REAPERAPI_WANT_GetPlayStateEx
+#define REAPERAPI_WANT_GetPlayPositionEx
+#define REAPERAPI_WANT_GetCursorPositionEx
+#define REAPERAPI_WANT_TimeMap2_timeToQN
+#define REAPERAPI_WANT_TimeMap2_QNToTime
+#define REAPERAPI_WANT_TimeMap_GetMeasureInfo
+#define REAPERAPI_WANT_TimeMap_QNToMeasures
+#define REAPERAPI_WANT_CreateTrackAudioAccessor
+#define REAPERAPI_WANT_DestroyAudioAccessor
+#define REAPERAPI_WANT_GetAudioAccessorSamples
+#define REAPERAPI_WANT_SetProjExtState
+#define REAPERAPI_WANT_GetProjExtState
+#define REAPERAPI_WANT_MarkProjectDirty
+#define REAPERAPI_WANT_ValidatePtr2
+
+#include "reaper_plugin.h"
+#include "reaper_plugin_functions.h"

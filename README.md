@@ -1,6 +1,10 @@
 # Hommelsound — ReaScripts
 
-A collection of REAPER scripts for MIDI analysis and visualization.
+A collection of REAPER scripts for MIDI analysis and visualization, plus the Guitar Tabs extension.
+
+## Guitar Tabs
+
+`guitartabs/` is a native REAPER extension: one tab staff per track, with standard and custom tunings, audio detection, and a playhead locked to the project tempo. Build and install steps are in [guitartabs/README.md](guitartabs/README.md).
 
 ## Generate Chord Track
 
@@ -90,7 +94,8 @@ If the bass plays the third (`E – G – C`), the script writes `C/E` instead o
 Hommelsound/
 ├── index.xml                      # ReaPack manifest
 ├── midi/
-│   └── Generate_Chord_Track.lua   # Main script
+│   └── Generate_Chord_Track.lua   # Chord script
+├── guitartabs/                    # Native guitar tab extension
 └── README.md
 ```
 
