@@ -87,41 +87,61 @@ bool selectionRange(void* project, double& start, double& end) {
   return end > start + 1e-4;
 }
 
-bool namesMultiSelect(const std::string& action) {
-  std::string lower = action;
-  for (char& ch : lower) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-  if (lower.find("toggle item selection") != std::string::npos) return true;
-  if (lower.find("add item") != std::string::npos && lower.find("selection") != std::string::npos) return true;
-  if (lower.find("leaving other items selected") != std::string::npos) return true;
-  return false;
-}
-
-bool actionSelectsMultiple(const char* action) {
-  if (!action || action[0] == 0) return false;
+const char* marqueeMode(const char* action) {
+  if (!action || action[0] == 0) return nullptr;
   const std::string text = action;
   if (text.size() >= 2 && text.compare(text.size() - 2, 2, " m") == 0) {
-    const int id = std::atoi(text.c_str());
-    return id >= 7 && id <= 22;
-  }
-  if (text.size() >= 2 && text.compare(text.size() - 2, 2, " c") == 0) {
-    const int command = std::atoi(text.c_str());
-    const char* name = kbd_getTextFromCmd ? kbd_getTextFromCmd(command, nullptr) : nullptr;
-    return name && namesMultiSelect(name);
-  }
-  return namesMultiSelect(text);
-}
-
-std::vector<int> multiSelectFlags() {
-  std::vector<int> flags;
-  if (GetMouseModifier) {
-    for (int flag = 1; flag <= 15; ++flag) {
-      char action[320] = {};
-      GetMouseModifier("MM_CTX_ITEM_CLK", flag, action, static_cast<int>(sizeof(action)));
-      if (actionSelectsMultiple(action)) flags.push_back(flag);
+    switch (std::atoi(text.c_str())) {
+      case 1:
+      case 4:
+      case 5:
+        return "replace";
+      case 2:
+        return "toggle";
+      case 3:
+        return "add";
+      default:
+        return nullptr;
     }
   }
-  if (flags.empty()) flags.push_back(2);
-  return flags;
+  std::string lower = text;
+  for (char& ch : lower) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+  if (lower.find("marquee") == std::string::npos || lower.find("item") == std::string::npos) return nullptr;
+  if (lower.find("toggle") != std::string::npos) return "toggle";
+  if (lower.find("add") != std::string::npos) return "add";
+  return "replace";
+}
+
+Json marqueeGestures() {
+  struct Context {
+    const char* name;
+    int button;
+  };
+  const Context contexts[] = {{"MM_CTX_ARRANGE_RMOUSE", 2}, {"MM_CTX_ARRANGE_MMOUSE", 1}};
+  Json list = Json::array();
+  if (GetMouseModifier) {
+    for (const Context& context : contexts) {
+      for (int flag = 0; flag <= 15; ++flag) {
+        char action[320] = {};
+        GetMouseModifier(context.name, flag, action, static_cast<int>(sizeof(action)));
+        const char* mode = marqueeMode(action);
+        if (!mode) continue;
+        Json item = Json::object();
+        item.set("button", Json::number(context.button));
+        item.set("modifiers", Json::number(flag));
+        item.set("mode", Json::string(mode));
+        list.push(std::move(item));
+      }
+    }
+  }
+  if (list.arr.empty()) {
+    Json item = Json::object();
+    item.set("button", Json::number(2));
+    item.set("modifiers", Json::number(0));
+    item.set("mode", Json::string("replace"));
+    list.push(std::move(item));
+  }
+  return list;
 }
 
 Json measureMap(void* project, const TabDocument& doc) {
@@ -243,9 +263,7 @@ void Session::pushState() {
   state.set("trackGuid", Json::string(guid_));
   state.set("presetList", presetsJson(doc_.stringCount));
   state.set("alive", Json::boolean(resolveTrack() != nullptr));
-  Json flags = Json::array();
-  for (int flag : multiSelectFlags()) flags.push(Json::number(flag));
-  state.set("selectFlags", std::move(flags));
+  state.set("marquee", marqueeGestures());
   emit("gtApplyState", state);
 }
 

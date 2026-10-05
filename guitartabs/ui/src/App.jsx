@@ -25,16 +25,17 @@ function noteExists(doc, note) {
   return fret != null && fret >= 0;
 }
 
-function modifierLabel(flags) {
-  const list = flags?.length ? [...flags] : [2];
-  list.sort((a, b) => bitCount(a) - bitCount(b) || a - b);
-  const flag = list[0];
+function gestureLabel(gestures) {
+  const list = gestures?.length ? [...gestures] : [{ button: 2, modifiers: 0, mode: "replace" }];
+  list.sort((a, b) => bitCount(a.modifiers) - bitCount(b.modifiers) || a.button - b.button);
+  const gesture = list[0];
   const parts = [];
-  if (flag & 1) parts.push("⇧");
-  if (flag & 2) parts.push("⌘");
-  if (flag & 4) parts.push("⌥");
-  if (flag & 8) parts.push("⌃");
-  return parts.join("") || "⌘";
+  if (gesture.modifiers & 1) parts.push("Shift+");
+  if (gesture.modifiers & 2) parts.push("⌘+");
+  if (gesture.modifiers & 4) parts.push("⌥+");
+  if (gesture.modifiers & 8) parts.push("⌃+");
+  const button = gesture.button === 2 ? "Right-drag" : gesture.button === 1 ? "Middle-drag" : "Drag";
+  return `${parts.join("")}${button}`;
 }
 
 function bitCount(value) {
@@ -243,19 +244,33 @@ export default function App() {
           follow={follow}
           pxPerQn={pxPerQn}
           selected={selected}
-          selectFlags={doc?.selectFlags}
+          marquee={doc?.marquee}
           onManualScroll={() => setFollow(false)}
           onSelect={(action) => {
             setEditor(null);
-            if (action.type === "toggle") {
+            const notes = action.notes || [];
+            if (action.mode === "add") {
               setSelected((current) => {
-                const exists = current.some((note) => sameNote(note, action, doc?.division));
-                if (exists) return current.filter((note) => !sameNote(note, action, doc?.division));
-                return [...current, { qn: action.qn, string: action.string }];
+                const next = [...current];
+                for (const note of notes) {
+                  if (!next.some((item) => sameNote(item, note, doc?.division))) next.push(note);
+                }
+                return next;
               });
               return;
             }
-            setSelected(action.notes || []);
+            if (action.mode === "toggle") {
+              setSelected((current) => {
+                let next = [...current];
+                for (const note of notes) {
+                  if (next.some((item) => sameNote(item, note, doc?.division))) next = next.filter((item) => !sameNote(item, note, doc?.division));
+                  else next.push(note);
+                }
+                return next;
+              });
+              return;
+            }
+            setSelected(notes);
           }}
           onCell={(hit, x, y) => {
             setSelected([]);
@@ -276,7 +291,7 @@ export default function App() {
           {doc ? `${doc.strings} strings · ${doc.preset}` : ""}
         </div>
         <div className={status.phase === "error" || status.phase === "empty" ? "status-pill warn" : "status-pill"}>
-          {status.detail || `${modifierLabel(doc?.selectFlags)}-click selects notes. Delete removes them. ⌘Z undoes.`}
+          {status.detail || `${gestureLabel(doc?.marquee)} selects notes. Delete removes them. ⌘Z undoes.`}
         </div>
       </footer>
       {confirm && (

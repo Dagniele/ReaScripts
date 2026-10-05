@@ -91,7 +91,7 @@ function seed() {
     trackGuid: "demo",
     presetList: list(6),
     alive: true,
-    selectFlags: [2],
+    marquee: [{ button: 2, modifiers: 0, mode: "replace" }],
   };
 }
 

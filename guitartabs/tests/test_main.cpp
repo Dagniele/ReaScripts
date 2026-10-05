@@ -140,27 +140,24 @@ int main() {
   }
   CHECK(voiced);
 
+  const double riffHz[] = {82.4069, 97.9989, 110.0, 123.4708};
+  const int riffFrets[] = {0, 3, 5, 7};
   std::vector<float> riff(static_cast<size_t>(kRate));
   for (int i = 0; i < kRate; ++i) {
     const double time = static_cast<double>(i) / kRate;
-    const float lowE = 0.34f * std::sin(2.0 * M_PI * 82.4069 * time) + 0.48f * std::sin(2.0 * M_PI * 164.8138 * time) +
-                       0.3f * std::sin(2.0 * M_PI * 247.2196 * time);
-    float sample = lowE;
-    if (time >= 0.5) {
-      sample += 0.4f * std::sin(2.0 * M_PI * 110.0 * time) + 0.42f * std::sin(2.0 * M_PI * 220.0 * time) +
-                0.22f * std::sin(2.0 * M_PI * 330.0 * time);
-    }
-    riff[static_cast<size_t>(i)] = sample;
+    const double hz = riffHz[std::min(3, static_cast<int>(time / 0.25))];
+    riff[static_cast<size_t>(i)] = 0.18f * std::sin(2.0 * M_PI * hz * time) + 0.55f * std::sin(2.0 * M_PI * hz * 2.0 * time) +
+                                   0.36f * std::sin(2.0 * M_PI * hz * 3.0 * time) + 0.2f * std::sin(2.0 * M_PI * hz * 4.0 * time);
   }
   guitartabs::TranscribeRequest riffRequest;
   riffRequest.samples = riff.data();
   riffRequest.sampleCount = static_cast<int>(riff.size());
   riffRequest.sampleRate = kRate;
   riffRequest.tuning = standard;
-  riffRequest.cellQn = {0, 0.5};
-  riffRequest.cellTime = {0, 0.5};
-  riffRequest.cellDuration = {0.5, 0.5};
-  riffRequest.cellQnDuration = {0.5, 0.5};
+  riffRequest.cellQn = {0, 0.5, 1.0, 1.5};
+  riffRequest.cellTime = {0, 0.25, 0.5, 0.75};
+  riffRequest.cellDuration = {0.25, 0.25, 0.25, 0.25};
+  riffRequest.cellQnDuration = {0.5, 0.5, 0.5, 0.5};
   const auto riffEvents = guitartabs::transcribe(riffRequest, nullptr);
   auto voices = [](const guitartabs::TabEvent& event) {
     int count = 0;
@@ -168,7 +165,11 @@ int main() {
       if (fret >= 0) ++count;
     return count;
   };
-  if (riffEvents.size() < 2 || voices(riffEvents[0]) != 1 || voices(riffEvents[1]) != 1) {
+  bool riffOk = riffEvents.size() == 4;
+  for (int i = 0; riffOk && i < 4; ++i) {
+    if (voices(riffEvents[static_cast<size_t>(i)]) != 1 || riffEvents[static_cast<size_t>(i)].frets[0] != riffFrets[i]) riffOk = false;
+  }
+  if (!riffOk) {
     std::cerr << "riff frets:";
     for (const auto& event : riffEvents) {
       std::cerr << " [";
@@ -177,12 +178,7 @@ int main() {
     }
     std::cerr << "\n";
   }
-  CHECK(riffEvents.size() >= 2);
-  CHECK(voices(riffEvents[0]) == 1);
-  CHECK(voices(riffEvents[1]) == 1);
-  CHECK(riffEvents[0].frets[0] == 0);
-  const bool newPitch = riffEvents[1].frets[0] == 5 || (riffEvents[1].frets.size() > 1 && riffEvents[1].frets[1] == 0);
-  CHECK(newPitch);
+  CHECK(riffOk);
 
   if (g_failures) {
     std::cerr << g_failures << " failed\n";

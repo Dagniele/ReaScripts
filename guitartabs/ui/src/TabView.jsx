@@ -13,7 +13,13 @@ function modifierMask(event) {
   return mask;
 }
 
-export default function TabView({ doc, map, transportRef, follow, pxPerQn, selected, selectFlags, onCell, onSelect, onManualScroll }) {
+function marqueeGesture(event, gestures) {
+  const list = gestures?.length ? gestures : [{ button: 2, modifiers: 0, mode: "replace" }];
+  const mask = modifierMask(event);
+  return list.find((gesture) => gesture.button === event.button && gesture.modifiers === mask) || null;
+}
+
+export default function TabView({ doc, map, transportRef, follow, pxPerQn, selected, marquee, onCell, onSelect, onManualScroll }) {
   const canvasRef = useRef(null);
   const scrollRef = useRef(0);
   const hoverRef = useRef(null);
@@ -240,22 +246,6 @@ export default function TabView({ doc, map, transportRef, follow, pxPerQn, selec
     };
   }
 
-  function selectsMultiple(event) {
-    const mask = modifierMask(event);
-    if (!mask) return false;
-    const flags = selectFlags?.length ? selectFlags : [2];
-    return flags.includes(mask);
-  }
-
-  function noteAt(hit) {
-    if (!hit) return null;
-    const step = 4 / (doc?.division || 8);
-    const found = doc?.events?.find((item) => Math.abs(item.qn - hit.qn) < step * 0.25);
-    const fret = found?.f?.[hit.string];
-    if (!found || fret == null || fret < 0) return null;
-    return { qn: found.qn, string: hit.string };
-  }
-
   function notesInside(x0, y0, x1, y1) {
     const left = Math.min(x0, x1) - 8;
     const right = Math.max(x0, x1) + 8;
@@ -289,20 +279,21 @@ export default function TabView({ doc, map, transportRef, follow, pxPerQn, selec
         scrollRef.current += delta;
         onManualScroll();
       }}
+      onContextMenu={(event) => event.preventDefault()}
       onPointerDown={(event) => {
-        if (event.button !== 0) return;
+        const gesture = marqueeGesture(event, marquee);
+        if (!gesture && event.button !== 0) return;
         const point = canvasPoint(event);
-        const multi = selectsMultiple(event);
         dragRef.current = {
           x: event.clientX,
           y: event.clientY,
           scroll: scrollRef.current,
           moved: false,
-          multi,
+          gesture,
           originX: point.x,
           originY: point.y,
         };
-        if (multi) event.preventDefault();
+        if (gesture) event.preventDefault();
         event.currentTarget.setPointerCapture(event.pointerId);
       }}
       onPointerMove={(event) => {
@@ -313,7 +304,7 @@ export default function TabView({ doc, map, transportRef, follow, pxPerQn, selec
         const dx = event.clientX - drag.x;
         const dy = event.clientY - drag.y;
         if (Math.abs(dx) > 4 || Math.abs(dy) > 4) drag.moved = true;
-        if (drag.multi) {
+        if (drag.gesture) {
           if (drag.moved) {
             const point = canvasPoint(event);
             bandRef.current = { x0: drag.originX, y0: drag.originY, x1: point.x, y1: point.y };
@@ -329,13 +320,10 @@ export default function TabView({ doc, map, transportRef, follow, pxPerQn, selec
         const drag = dragRef.current;
         dragRef.current = null;
         bandRef.current = null;
-        if (drag?.multi) {
-          if (!drag.moved) {
-            const note = noteAt(locate(event));
-            if (note) onSelect({ type: "toggle", ...note });
-          } else {
+        if (drag?.gesture) {
+          if (drag.moved) {
             const point = canvasPoint(event);
-            onSelect({ type: "marquee", notes: notesInside(drag.originX, drag.originY, point.x, point.y) });
+            onSelect({ type: "marquee", mode: drag.gesture.mode, notes: notesInside(drag.originX, drag.originY, point.x, point.y) });
           }
           return;
         }

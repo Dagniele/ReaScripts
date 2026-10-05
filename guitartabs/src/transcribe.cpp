@@ -78,12 +78,6 @@ std::vector<float> spectrum(const float* samples, int sampleCount, int center, i
   return spectrumSpan(samples, sampleCount, start, start + fftSize, fftSize);
 }
 
-double spectralEnergy(const std::vector<float>& mag) {
-  double sum = 0;
-  for (float value : mag) sum += static_cast<double>(value) * value;
-  return sum;
-}
-
 bool nearHarmonic(int upper, int lower) {
   if (upper <= lower) return false;
   const double ratio = midiFrequency(upper) / midiFrequency(lower);
@@ -218,6 +212,78 @@ std::vector<int> assignFrets(const std::vector<int>& pitches, const std::vector<
   return best;
 }
 
+struct YinPitch {
+  int midi = -1;
+  float cmnd = 1.f;
+};
+
+YinPitch estimateMidi(const float* samples, int count, int sampleRate, int lowMidi, int highMidi) {
+  if (!samples || count < 128 || sampleRate < 1000) return {};
+  const int lowest = std::clamp(lowMidi, 20, 96);
+  const int highest = std::clamp(highMidi, lowest, 108);
+  const int maxTau = std::min(count / 2, static_cast<int>(std::floor(sampleRate / midiFrequency(lowest))));
+  const int minTau = std::max(2, static_cast<int>(std::ceil(sampleRate / midiFrequency(highest))));
+  if (maxTau <= minTau + 2) return {};
+
+  int fftSize = 1;
+  while (fftSize < count * 2) fftSize <<= 1;
+  std::vector<std::complex<float>> spectrumBins(static_cast<size_t>(fftSize));
+  for (int i = 0; i < count; ++i) spectrumBins[static_cast<size_t>(i)] = samples[i];
+  fft(spectrumBins);
+  for (auto& bin : spectrumBins) bin = std::norm(bin);
+  fft(spectrumBins);
+  for (auto& bin : spectrumBins) bin = std::conj(bin);
+  const float scale = 1.f / static_cast<float>(fftSize);
+
+  std::vector<double> prefix(static_cast<size_t>(count) + 1, 0.0);
+  for (int i = 0; i < count; ++i) prefix[static_cast<size_t>(i) + 1] = prefix[static_cast<size_t>(i)] + static_cast<double>(samples[i]) * samples[i];
+
+  std::vector<float> cmnd(static_cast<size_t>(maxTau) + 1, 1.f);
+  double running = 0;
+  int bestTau = -1;
+  for (int tau = 1; tau <= maxTau; ++tau) {
+    const double left = prefix[static_cast<size_t>(count - tau)];
+    const double right = prefix[static_cast<size_t>(count)] - prefix[static_cast<size_t>(tau)];
+    const double correlation = static_cast<double>(spectrumBins[static_cast<size_t>(tau)].real()) * scale;
+    const double difference = std::max(0.0, left + right - 2.0 * correlation);
+    running += difference;
+    cmnd[static_cast<size_t>(tau)] = running > 1e-12 ? static_cast<float>(difference * tau / running) : 1.f;
+    if (tau >= minTau && (bestTau < 0 || cmnd[static_cast<size_t>(tau)] < cmnd[static_cast<size_t>(bestTau)])) bestTau = tau;
+  }
+
+  int tau = -1;
+  for (int candidate = minTau; candidate <= maxTau; ++candidate) {
+    if (cmnd[static_cast<size_t>(candidate)] < 0.15f) {
+      while (candidate + 1 <= maxTau && cmnd[static_cast<size_t>(candidate + 1)] < cmnd[static_cast<size_t>(candidate)]) ++candidate;
+      tau = candidate;
+      break;
+    }
+  }
+  if (tau < 0) {
+    if (bestTau < 0 || cmnd[static_cast<size_t>(bestTau)] > 0.5f) return {};
+    tau = bestTau;
+  }
+
+  float refined = static_cast<float>(tau);
+  if (tau > minTau && tau < maxTau) {
+    const float earlier = cmnd[static_cast<size_t>(tau - 1)];
+    const float here = cmnd[static_cast<size_t>(tau)];
+    const float later = cmnd[static_cast<size_t>(tau + 1)];
+    const float denom = 2.f * (earlier - 2.f * here + later);
+    if (std::abs(denom) > 1e-8f) {
+      const float delta = (earlier - later) / denom;
+      if (std::abs(delta) < 1.f) refined = static_cast<float>(tau) + delta;
+    }
+  }
+  if (refined < 1.f) return {};
+  const double frequency = sampleRate / static_cast<double>(refined);
+  const double midi = 69.0 + 12.0 * std::log2(frequency / 440.0);
+  YinPitch pitch;
+  pitch.cmnd = cmnd[static_cast<size_t>(tau)];
+  pitch.midi = std::clamp(static_cast<int>(std::lround(midi)), lowest, highest);
+  return pitch;
+}
+
 std::vector<int> detectMidis(const float* samples, int count, int sampleRate, int lowMidi, int highMidi, int maxNotes) {
   if (!samples || count < 64 || sampleRate < 1000) return {};
   int fftSize = 4096;
@@ -247,10 +313,10 @@ std::vector<TabEvent> transcribe(const TranscribeRequest& request, std::atomic<f
   const int highMidi = std::min(96, *std::max_element(request.tuning.begin(), request.tuning.end()) + request.maxFret);
 
   std::vector<int> previous(request.tuning.size(), -1);
-  std::vector<int> previousNotes;
-  std::vector<float> previousMag;
   float previousRms = 0;
   const int stringCount = static_cast<int>(request.tuning.size());
+  const double lowestFrequency = midiFrequency(lowMidi);
+  const int minimumSamples = std::clamp(static_cast<int>(request.sampleRate / lowestFrequency * 4.0), 512, request.sampleRate / 2);
 
   for (int cell = 0; cell < cells; ++cell) {
     if (progress && cell % 8 == 0) {
@@ -266,39 +332,59 @@ std::vector<TabEvent> transcribe(const TranscribeRequest& request, std::atomic<f
 
     std::vector<int> frets(static_cast<size_t>(stringCount), -1);
     if (energy >= gate) {
-      const auto mag = spectrumSpan(request.samples, request.sampleCount, sliceStart, sliceEnd, fftSize);
-      std::vector<float> residual = mag;
-      if (previousMag.size() == mag.size()) {
-        float framePeak = 0;
-        float prevPeak = 0;
-        for (float value : mag) framePeak = std::max(framePeak, value);
-        for (float value : previousMag) prevPeak = std::max(prevPeak, value);
-        const float carry = prevPeak > 1e-8f ? framePeak / prevPeak * 0.85f : 0;
-        for (size_t bin = 0; bin < residual.size(); ++bin) residual[bin] = std::max(0.f, mag[bin] - previousMag[bin] * carry);
+      int useStart = sliceStart;
+      int useCount = std::max(0, sliceEnd - sliceStart);
+      const int cap = std::max(minimumSamples, request.sampleRate / 2);
+      if (useCount > cap) {
+        useStart += (useCount - cap) / 2;
+        useCount = cap;
+      } else if (useCount < minimumSamples) {
+        const int center = sliceStart + useCount / 2;
+        useStart = center - minimumSamples / 2;
+        useCount = minimumSamples;
       }
-      const bool sustain = !previousMag.empty() && spectralEnergy(residual) < spectralEnergy(mag) * 0.22 &&
-                           std::any_of(previous.begin(), previous.end(), [](int fret) { return fret >= 0; });
-      if (sustain) {
-        frets = previous;
-      } else {
-        const std::vector<float>& source = previousMag.empty() ? mag : residual;
-        std::vector<int> notes = pickNotes(source, fftSize, request.sampleRate, lowMidi, highMidi, stringCount);
-        if (notes.empty() && &source != &mag) notes = pickNotes(mag, fftSize, request.sampleRate, lowMidi, highMidi, stringCount);
-        if (!previousNotes.empty()) {
-          std::vector<int> fresh;
-          for (int note : notes) {
-            const bool held = std::any_of(previousNotes.begin(), previousNotes.end(), [&](int old) { return std::abs(old - note) <= 1; });
-            if (!held) fresh.push_back(note);
-          }
-          if (!fresh.empty()) notes = std::move(fresh);
+      useStart = std::clamp(useStart, 0, request.sampleCount);
+      useCount = std::clamp(useCount, 0, request.sampleCount - useStart);
+
+      const YinPitch pitch = estimateMidi(request.samples + useStart, useCount, request.sampleRate, lowMidi, highMidi);
+      const auto mag = spectrumSpan(request.samples, request.sampleCount, useStart, useStart + useCount, fftSize);
+      std::vector<int> spectral = pickNotes(mag, fftSize, request.sampleRate, lowMidi, highMidi, stringCount);
+      std::vector<int> notes;
+      if (pitch.midi >= 0 && pitch.cmnd < 0.2f) {
+        int fundamental = pitch.midi;
+        for (int extra : spectral) {
+          if (extra < fundamental && nearHarmonic(fundamental, extra)) fundamental = extra;
         }
-        frets = assignFrets(notes, request.tuning, request.maxFret);
-        previousNotes = std::move(notes);
+        notes.push_back(fundamental);
+        for (int extra : spectral) {
+          if (std::abs(extra - fundamental) <= 1) continue;
+          if (nearHarmonic(extra, fundamental) || nearHarmonic(fundamental, extra)) continue;
+          notes.push_back(extra);
+          if (notes.size() >= 3) break;
+        }
+      } else if (!spectral.empty()) {
+        notes = std::move(spectral);
+      } else if (pitch.midi >= 0) {
+        notes.push_back(pitch.midi);
       }
-      previousMag = mag;
-    } else {
-      previousNotes.clear();
-      previousMag.clear();
+      frets = assignFrets(notes, request.tuning, request.maxFret);
+      if (notes.size() == 1) {
+        int previousString = -1;
+        int previousFret = -1;
+        for (int stringIndex = 0; stringIndex < stringCount; ++stringIndex) {
+          if (previous[static_cast<size_t>(stringIndex)] < 0) continue;
+          previousString = stringIndex;
+          previousFret = previous[static_cast<size_t>(stringIndex)];
+          break;
+        }
+        if (previousString >= 0) {
+          const int stayed = notes[0] - request.tuning[static_cast<size_t>(previousString)];
+          if (stayed >= 0 && stayed <= request.maxFret && std::abs(stayed - previousFret) <= 12) {
+            std::fill(frets.begin(), frets.end(), -1);
+            frets[static_cast<size_t>(previousString)] = stayed;
+          }
+        }
+      }
     }
 
     int attacks = 0;
