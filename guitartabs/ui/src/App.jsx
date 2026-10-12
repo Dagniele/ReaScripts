@@ -2,15 +2,24 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { installBridge, post } from "./bridge.js";
 import TabView from "./TabView.jsx";
 import { barBeat, midiName } from "./theory.js";
+import { GROUPS } from "./techniques.js";
 import "./styles.css";
 
 const PITCHES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 
-function currentFret(doc, qn, stringIndex) {
+function eventAt(doc, qn) {
   const step = 4 / (doc?.division || 8);
-  const event = doc?.events?.find((item) => Math.abs(item.qn - qn) < step * 0.25);
-  const fret = event?.f?.[stringIndex];
+  return doc?.events?.find((item) => Math.abs(item.qn - qn) < step * 0.25);
+}
+
+function currentFret(doc, qn, stringIndex) {
+  const fret = eventAt(doc, qn)?.f?.[stringIndex];
   return fret >= 0 ? String(fret) : "";
+}
+
+function cellMark(doc, qn, stringIndex) {
+  const event = eventAt(doc, qn);
+  return { tech: event?.k?.[stringIndex] || 0, bend: event?.bn?.[stringIndex] || 0 };
 }
 
 function sameNote(a, b, division) {
@@ -36,6 +45,61 @@ function gestureLabel(gestures) {
   if (gesture.modifiers & 8) parts.push("⌃+");
   const button = gesture.button === 2 ? "Right-drag" : gesture.button === 1 ? "Middle-drag" : "Drag";
   return `${parts.join("")}${button}`;
+}
+
+function TechniqueChooser({ mark, onBit, onBend }) {
+  return (
+    <div className="techs">
+      {GROUPS.map((group) => (
+        <div className="tech-group" key={group.name}>
+          <span>{group.name}</span>
+          <div className="chips">
+            {group.items.map((item) => {
+              const on = item.bend != null ? mark.bend === item.bend : (mark.tech & item.bit) !== 0;
+              return (
+                <button
+                  key={item.title}
+                  type="button"
+                  className={on ? "on" : ""}
+                  title={item.title}
+                  onClick={() => {
+                    if (item.bend != null) onBend(on ? 0 : item.bend);
+                    else onBit(item.bit, !on);
+                  }}
+                >
+                  {item.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function TechniqueBar({ marks, onBit, onBend }) {
+  return (
+    <div className="techbar" role="toolbar" aria-label="Techniques for the selected notes">
+      {GROUPS.flatMap((group) => group.items).map((item) => {
+        const on = item.bend != null ? marks.every((mark) => mark.bend === item.bend) : marks.every((mark) => (mark.tech & item.bit) !== 0);
+        return (
+          <button
+            key={item.title}
+            type="button"
+            className={on ? "on" : ""}
+            title={item.title}
+            onClick={() => {
+              if (item.bend != null) onBend(on ? 0 : item.bend);
+              else onBit(item.bit, !on);
+            }}
+          >
+            {item.label}
+          </button>
+        );
+      })}
+    </div>
+  );
 }
 
 function bitCount(value) {
@@ -274,10 +338,17 @@ export default function App() {
           }}
           onCell={(hit, x, y) => {
             setSelected([]);
-            setEditor({ ...hit, x: Math.min(x, window.innerWidth - 220), y: Math.min(y, window.innerHeight - 180) });
+            setEditor({ ...hit, x: Math.min(x, window.innerWidth - 300), y: Math.min(y, window.innerHeight - 520) });
             setDraft(currentFret(doc, hit.qn, hit.string));
           }}
         />
+        {selected.length > 0 && !editor && (
+          <TechniqueBar
+            marks={selected.map((note) => cellMark(doc, note.qn, note.string))}
+            onBit={(bit, on) => post({ type: "setMark", cells: selected, bit, on })}
+            onBend={(bend) => post({ type: "setMark", cells: selected, bend })}
+          />
+        )}
       </div>
       <footer className="foot">
         <div>
@@ -291,7 +362,7 @@ export default function App() {
           {doc ? `${doc.strings} strings · ${doc.preset}` : ""}
         </div>
         <div className={status.phase === "error" || status.phase === "empty" ? "status-pill warn" : "status-pill"}>
-          {status.detail || `${gestureLabel(doc?.marquee)} selects notes. Delete removes them. ⌘Z undoes.`}
+          {status.detail || `${gestureLabel(doc?.marquee)} selects notes. Click one to add a slide, bend, or palm mute.`}
         </div>
       </footer>
       {confirm && (
@@ -355,6 +426,25 @@ export default function App() {
             </button>
             <button type="submit">Set</button>
           </div>
+          <TechniqueChooser
+            mark={cellMark(doc, editor.qn, editor.string)}
+            onBit={(bit, on) => {
+              const fret = draft === "" ? -1 : Number(draft);
+              if (fret >= 0 && currentFret(doc, editor.qn, editor.string) === "") {
+                post({ type: "setCell", qn: editor.qn, string: editor.string, fret });
+              }
+              if (fret < 0 && currentFret(doc, editor.qn, editor.string) === "") return;
+              post({ type: "setMark", cells: [{ qn: editor.qn, string: editor.string }], bit, on });
+            }}
+            onBend={(bend) => {
+              const fret = draft === "" ? -1 : Number(draft);
+              if (fret >= 0 && currentFret(doc, editor.qn, editor.string) === "") {
+                post({ type: "setCell", qn: editor.qn, string: editor.string, fret });
+              }
+              if (fret < 0 && currentFret(doc, editor.qn, editor.string) === "") return;
+              post({ type: "setMark", cells: [{ qn: editor.qn, string: editor.string }], bend });
+            }}
+          />
         </form>
       )}
     </div>

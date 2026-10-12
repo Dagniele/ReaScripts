@@ -1,3 +1,5 @@
+import { nextMask } from "./techniques.js";
+
 const PRESETS = {
   4: [
     ["Standard (DGBE)", [50, 55, 59, 64]],
@@ -79,7 +81,14 @@ function seed() {
     [-1, 3, 2, 0, 1, 0],
     [-1, -1, 0, 2, 3, 1],
   ];
-  const events = shapes.map((frets, index) => ({ qn: index * 2, d: 2, f: frets, a: 0b111111 }));
+  const events = shapes.map((frets, index) => ({
+    qn: index * 2,
+    d: 2,
+    f: frets,
+    k: frets.map(() => 0),
+    bn: frets.map(() => 0),
+    a: 0b111111,
+  }));
   return {
     v: 1,
     strings: 6,
@@ -115,14 +124,21 @@ function setCount(count) {
   state.events = state.events
     .map((event) => {
       const frets = Array(count).fill(-1);
+      const marks = Array(count).fill(0);
+      const bends = Array(count).fill(0);
+      const place = (dest, src) => {
+        frets[dest] = event.f[src];
+        marks[dest] = event.k?.[src] || 0;
+        bends[dest] = event.bn?.[src] || 0;
+      };
       if (count > old) {
         const add = count - old;
-        for (let i = 0; i < old; i += 1) frets[add + i] = event.f[i];
+        for (let i = 0; i < old; i += 1) place(add + i, i);
       } else {
         const drop = old - count;
-        for (let i = 0; i < count; i += 1) frets[i] = event.f[drop + i];
+        for (let i = 0; i < count; i += 1) place(i, drop + i);
       }
-      return { ...event, f: frets, a: 0 };
+      return { ...event, f: frets, k: marks, bn: bends, a: 0 };
     })
     .filter((event) => event.f.some((fret) => fret >= 0));
 }
@@ -182,7 +198,7 @@ export function demoDispatch(message) {
       if (fret < 0) continue;
       const frets = Array(state.strings).fill(-1);
       frets[0] = fret;
-      state.events.push({ qn, d: step, f: frets, a: 1 });
+      state.events.push({ qn, d: step, f: frets, k: Array(state.strings).fill(0), bn: Array(state.strings).fill(0), a: 1 });
     }
     push();
     handlers.onStatus({ phase: "idle", progress: 1, detail: "Preview transcription" });
@@ -207,13 +223,19 @@ export function demoDispatch(message) {
     const qn = Math.floor(message.qn / step + 1e-6) * step;
     let event = state.events.find((item) => Math.abs(item.qn - qn) < step * 0.25);
     if (!event && fret >= 0) {
-      event = { qn, d: step, f: Array(state.strings).fill(-1), a: 0 };
+      event = { qn, d: step, f: Array(state.strings).fill(-1), k: Array(state.strings).fill(0), bn: Array(state.strings).fill(0), a: 0 };
       state.events.push(event);
     }
     if (event) {
+      if (!event.k) event.k = Array(state.strings).fill(0);
+      if (!event.bn) event.bn = Array(state.strings).fill(0);
       event.f[message.string] = fret;
       if (fret >= 0) event.a |= 1 << message.string;
-      else event.a &= ~(1 << message.string);
+      else {
+        event.a &= ~(1 << message.string);
+        event.k[message.string] = 0;
+        event.bn[message.string] = 0;
+      }
       if (event.f.every((value) => value < 0)) state.events = state.events.filter((item) => item !== event);
       state.events.sort((a, b) => a.qn - b.qn);
     }
@@ -225,7 +247,32 @@ export function demoDispatch(message) {
       if (!event) continue;
       event.f[cell.string] = -1;
       event.a &= ~(1 << cell.string);
+      if (event.k) event.k[cell.string] = 0;
+      if (event.bn) event.bn[cell.string] = 0;
       if (event.f.every((value) => value < 0)) state.events = state.events.filter((item) => item !== event);
+    }
+  } else if (message.type === "setMark") {
+    const step = 4 / state.division;
+    let touched = false;
+    for (const cell of message.cells || []) {
+      const qn = Math.floor(cell.qn / step + 1e-6) * step;
+      const event = state.events.find((item) => Math.abs(item.qn - qn) < step * 0.25);
+      if (!event || event.f[cell.string] < 0) continue;
+      if (!event.k) event.k = Array(state.strings).fill(0);
+      if (!event.bn) event.bn = Array(state.strings).fill(0);
+      if (message.bend != null) {
+        if (event.bn[cell.string] === message.bend) continue;
+        event.bn[cell.string] = message.bend;
+      } else {
+        const next = nextMask(event.k[cell.string] || 0, message.bit, message.on);
+        if (next === (event.k[cell.string] || 0)) continue;
+        event.k[cell.string] = next;
+      }
+      touched = true;
+    }
+    if (!touched) {
+      undo.pop();
+      return;
     }
   } else if (message.type === "clearRange") state.events = [];
   else {

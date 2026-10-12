@@ -69,6 +69,28 @@ int main() {
   CHECK(loaded.stringCount == 6);
   CHECK(loaded.events.size() == 1);
   CHECK(loaded.events[0].frets[0] == 3);
+
+  guitartabs::TabDocument marks = guitartabs::TabDocument::makeDefault();
+  CHECK(marks.setCell(0.0, 0, 5));
+  CHECK(marks.setMark(0.0, 0, guitartabs::kMarkPalm, true));
+  CHECK(marks.setMark(0.0, 0, guitartabs::kMarkHammer, true));
+  CHECK(marks.setMark(0.0, 0, guitartabs::kMarkPull, true));
+  CHECK((marks.events[0].marks[0] & guitartabs::kMarkHammer) == 0);
+  CHECK(marks.events[0].marks[0] & guitartabs::kMarkPull);
+  CHECK(marks.events[0].marks[0] & guitartabs::kMarkPalm);
+  CHECK(marks.setBend(0.0, 0, 4));
+  CHECK(marks.events[0].bends[0] == 4);
+  CHECK(marks.setBend(0.0, 0, 3) == false);
+  const guitartabs::TabDocument marksLoaded = guitartabs::fromJson(guitartabs::parse(guitartabs::stringify(guitartabs::toJson(marks))));
+  CHECK(marksLoaded.events[0].bends[0] == 4);
+  CHECK(marksLoaded.events[0].marks[0] & guitartabs::kMarkPalm);
+  CHECK(marksLoaded.events[0].marks[0] & guitartabs::kMarkPull);
+  marks.setStringCount(7);
+  CHECK(marks.events[0].frets[1] == 5);
+  CHECK(marks.events[0].marks[1] & guitartabs::kMarkPalm);
+  CHECK(marks.events[0].bends[1] == 4);
+  CHECK(marks.events[0].marks[0] == 0);
+
   CHECK(guitartabs::parse("{\"ok\":true,\"n\":1.5}").boolean("ok", false));
   CHECK(std::abs(guitartabs::parse("{\"ok\":true,\"n\":1.5}").number("n", 0) - 1.5) < 1e-9);
 

@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { midiName } from "./theory.js";
+import { BEND_NAMES, MARK, annotation, fretLabel } from "./techniques.js";
 
 const GUTTER = 78;
 const RULER = 36;
@@ -132,32 +133,95 @@ export default function TabView({ doc, map, transportRef, follow, pxPerQn, selec
             previous[string] = null;
             continue;
           }
+          const mask = event.k?.[string] || 0;
+          const bend = event.bn?.[string] || 0;
           const attack = (event.a || 0) & (1 << string);
           const prior = previous[string];
           const sustained = prior && prior.fret === fret && Math.abs(prior.qn + prior.d - event.qn) < 1e-2 && !attack;
           const chosen = (selected || []).some((note) => note.string === string && Math.abs(note.qn - event.qn) < 1e-3);
+          const ink = chosen ? "#e36a3a" : "#f6f1e7";
+          if (prior && (mask & (MARK.slideUp | MARK.slideDown)) && prior.fret !== fret) {
+            ctx.strokeStyle = "rgba(243,239,230,0.72)";
+            ctx.lineWidth = 1.4;
+            ctx.beginPath();
+            ctx.moveTo(prior.x + 10, prior.y);
+            ctx.lineTo(x - 12, y);
+            ctx.stroke();
+          }
+          if (prior && (mask & (MARK.hammer | MARK.pull))) {
+            ctx.fillStyle = "#c9d7cf";
+            ctx.font = "600 11px SF Mono, ui-monospace, Menlo, monospace";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText(mask & MARK.hammer ? "h" : "p", (prior.x + x) / 2, y - 14);
+          }
+          if (mask & (MARK.fromBelow | MARK.fromAbove)) {
+            ctx.strokeStyle = ink;
+            ctx.lineWidth = 1.4;
+            ctx.beginPath();
+            ctx.moveTo(x - 16, y + (mask & MARK.fromBelow ? 9 : -9));
+            ctx.lineTo(x - 8, y);
+            ctx.stroke();
+          }
           if (sustained) {
-            ctx.fillStyle = chosen ? "#e36a3a" : "rgba(243,239,230,0.78)";
+            ctx.fillStyle = ink;
             ctx.fillRect(x - 7, y - 1.25, 14, chosen ? 3.5 : 2.5);
           } else {
-            ctx.fillStyle = "rgba(12,14,18,0.86)";
+            const label = fretLabel(fret, mask);
+            ctx.font = "600 13px SF Mono, ui-monospace, Menlo, monospace";
+            const width = Math.max(22, ctx.measureText(label).width + 10);
+            ctx.fillStyle = "rgba(12,14,18,0.92)";
             ctx.beginPath();
-            ctx.arc(x, y, 11, 0, Math.PI * 2);
+            ctx.roundRect(x - width / 2, y - 11, width, 22, 11);
             ctx.fill();
             if (chosen) {
               ctx.strokeStyle = "#e36a3a";
               ctx.lineWidth = 2;
               ctx.beginPath();
-              ctx.arc(x, y, 13, 0, Math.PI * 2);
+              ctx.roundRect(x - width / 2 - 2, y - 13, width + 4, 26, 13);
               ctx.stroke();
             }
-            ctx.fillStyle = chosen ? "#e36a3a" : "#f6f1e7";
-            ctx.font = "600 13px SF Mono, ui-monospace, Menlo, monospace";
+            ctx.fillStyle = ink;
             ctx.textAlign = "center";
             ctx.textBaseline = "middle";
-            ctx.fillText(String(fret), x, y + 0.5);
+            ctx.fillText(label, x, y + 0.5);
           }
-          previous[string] = { fret, qn: event.qn, d: event.d };
+          if (bend) {
+            const rise = 8 + bend * 1.2;
+            ctx.strokeStyle = "#e36a3a";
+            ctx.lineWidth = 1.3;
+            ctx.beginPath();
+            ctx.moveTo(x + 10, y - 2);
+            ctx.quadraticCurveTo(x + 18, y - rise, x + 28, y - rise);
+            if (mask & MARK.release) ctx.quadraticCurveTo(x + 36, y - rise, x + 42, y - 2);
+            ctx.stroke();
+            ctx.fillStyle = "#e36a3a";
+            ctx.font = "10px SF Mono, ui-monospace, Menlo, monospace";
+            ctx.textAlign = "left";
+            ctx.textBaseline = "bottom";
+            const bendText = `${mask & MARK.preBend ? "pre " : ""}${BEND_NAMES[bend] || ""}`;
+            ctx.fillText(bendText, x + 16, y - rise - 1);
+          }
+          const palmContinues = prior && prior.mask & MARK.palm && mask & MARK.palm;
+          if (palmContinues) {
+            ctx.strokeStyle = "rgba(125,222,196,0.7)";
+            ctx.setLineDash([2, 3]);
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(prior.x, y - 18);
+            ctx.lineTo(x, y - 18);
+            ctx.stroke();
+            ctx.setLineDash([]);
+          }
+          const caption = annotation(mask & (palmContinues ? ~MARK.palm : ~0));
+          if (caption) {
+            ctx.fillStyle = "#c9d7cf";
+            ctx.font = "10px Avenir Next, Segoe UI, sans-serif";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "bottom";
+            ctx.fillText(caption, x, y - 14);
+          }
+          previous[string] = { fret, qn: event.qn, d: event.d, x, y, mask };
         }
       }
 
@@ -240,9 +304,24 @@ export default function TabView({ doc, map, transportRef, follow, pxPerQn, selec
     const fromTop = Math.round((y - top) / gap);
     if (fromTop < 0 || fromTop >= strings) return null;
     const step = 4 / (doc?.division || 8);
+    const string = strings - 1 - fromTop;
+    const cursorX = x + scrollRef.current - GUTTER;
+    const reach = Math.min(22, Math.max(10, step * pxPerQn * 0.55));
+    let nearest = null;
+    let nearestDist = reach;
+    for (const item of doc?.events || []) {
+      const fret = item.f?.[string];
+      if (fret == null || fret < 0) continue;
+      const noteX = item.qn * pxPerQn + (item.d * pxPerQn) / 2;
+      const dist = Math.abs(cursorX - noteX);
+      if (dist <= nearestDist) {
+        nearestDist = dist;
+        nearest = item.qn;
+      }
+    }
     return {
-      qn: Math.floor(qn / step + 1e-6) * step,
-      string: strings - 1 - fromTop,
+      qn: nearest != null ? nearest : Math.floor(qn / step + 1e-6) * step,
+      string,
     };
   }
 

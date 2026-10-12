@@ -387,6 +387,19 @@ void Session::onMessage(const std::string& text) {
     changed = doc_.setCell(message.number("qn", 0), message.integer("string", -1), message.integer("fret", -1));
   } else if (type == "clearCell") {
     changed = doc_.setCell(message.number("qn", 0), message.integer("string", -1), -1);
+  } else if (type == "setMark") {
+    if (const std::vector<Json>* cells = message.array("cells")) {
+      const bool bend = message.find("bend") != nullptr;
+      for (const Json& cell : *cells) {
+        const double qn = cell.number("qn", 0);
+        const int stringIndex = cell.integer("string", -1);
+        if (bend) {
+          if (doc_.setBend(qn, stringIndex, message.integer("bend", 0))) changed = true;
+        } else if (doc_.setMark(qn, stringIndex, static_cast<uint32_t>(message.integer("bit", 0)), message.boolean("on", true))) {
+          changed = true;
+        }
+      }
+    }
   } else if (type == "clearCells") {
     if (const std::vector<Json>* cells = message.array("cells")) {
       for (const Json& cell : *cells) {

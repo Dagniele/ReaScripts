@@ -8,7 +8,7 @@ A REAPER extension that opens one tab editor per track. It is a native extension
 - Choose 4, 5, 6, 7, or 8 strings. Six-string standard E is the default.
 - Pick a tuning (Standard E, Drop D, Drop C, Drop A, and the other built-in sets) or tune each string yourself.
 - Click **Detect audio** to transcribe the track. A time selection limits the analysis to that range; otherwise the whole project is used. If that range already has tabs, choose **Stop** or **Replace**.
-- Click any cell and type a fret from 0 to 24. Changes are saved in the project and can be undone with ⌘Z.
+- Click any cell and type a fret from 0 to 24. The same editor, or a selection of notes, can add hammer-ons, pull-offs, slides, bends, vibrato, palm mutes, harmonics, dead and ghost notes, taps, slaps, and the other standard marks. Changes are saved in the project and can be undone with ⌘Z.
 - The staff follows the project tempo map. **Follow** keeps the REAPER playhead in view.
 
 Detect reads the track pre-FX and turns it into MIDI with Spotify Basic Pitch (Apache 2.0, model under `third_party/basic-pitch`), then places those notes on the fretboard. A small context search keeps a running hand position: small melodic steps stay on the same string, while a leap can move to a lower shape such as an octave. Set the tab tuning to the part you recorded. Distortion, bends, and several guitars on one track are still unreliable.

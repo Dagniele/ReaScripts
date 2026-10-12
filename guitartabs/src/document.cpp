@@ -62,6 +62,38 @@ bool eventEmpty(const TabEvent& event) {
   return std::none_of(event.frets.begin(), event.frets.end(), [](int fret) { return fret >= 0; });
 }
 
+void fitMarks(TabEvent& event, int count) {
+  event.marks.resize(static_cast<size_t>(count), 0);
+  event.bends.resize(static_cast<size_t>(count), 0);
+}
+
+uint32_t withRivalCleared(uint32_t mask, uint32_t bit) {
+  if (bit == kMarkHammer) mask &= ~kMarkPull;
+  else if (bit == kMarkPull) mask &= ~kMarkHammer;
+  else if (bit == kMarkSlideUp) mask &= ~kMarkSlideDown;
+  else if (bit == kMarkSlideDown) mask &= ~kMarkSlideUp;
+  else if (bit == kMarkSlideBelow) mask &= ~kMarkSlideAbove;
+  else if (bit == kMarkSlideAbove) mask &= ~kMarkSlideBelow;
+  else if (bit == kMarkHarmonic) mask &= ~kMarkPinch;
+  else if (bit == kMarkPinch) mask &= ~kMarkHarmonic;
+  else if (bit == kMarkSlap) mask &= ~kMarkPop;
+  else if (bit == kMarkPop) mask &= ~kMarkSlap;
+  return mask;
+}
+
+bool knownBend(int quarters) {
+  return quarters == 0 || quarters == 1 || quarters == 2 || quarters == 4 || quarters == 6 || quarters == 8;
+}
+
+TabEvent* eventAt(TabDocument& doc, double qn) {
+  const double step = divisionStep(doc.division);
+  const double snapped = std::floor(qn / step + 1e-6) * step;
+  for (TabEvent& event : doc.events) {
+    if (std::abs(event.qn - snapped) <= step * 0.25) return &event;
+  }
+  return nullptr;
+}
+
 std::vector<int> rowNotes(const PresetRow& row) {
   return std::vector<int>(row.notes, row.notes + row.count);
 }
@@ -128,22 +160,26 @@ void TabDocument::setStringCount(int count) {
 
   for (TabEvent& event : events) {
     std::vector<int> frets(static_cast<size_t>(count), -1);
+    std::vector<uint32_t> marks(static_cast<size_t>(count), 0);
+    std::vector<int> bends(static_cast<size_t>(count), 0);
     int attacks = 0;
+    auto take = [&](int dest, int src) {
+      if (src < 0 || src >= static_cast<int>(event.frets.size())) return;
+      frets[static_cast<size_t>(dest)] = event.frets[static_cast<size_t>(src)];
+      if (src < static_cast<int>(event.marks.size())) marks[static_cast<size_t>(dest)] = event.marks[static_cast<size_t>(src)];
+      if (src < static_cast<int>(event.bends.size())) bends[static_cast<size_t>(dest)] = event.bends[static_cast<size_t>(src)];
+      if (src < 16 && (event.attacks & (1 << src))) attacks |= 1 << dest;
+    };
     if (count > old) {
       const int add = count - old;
-      for (int i = 0; i < old && i < static_cast<int>(event.frets.size()); ++i) {
-        frets[static_cast<size_t>(add + i)] = event.frets[static_cast<size_t>(i)];
-        if (event.attacks & (1 << i)) attacks |= 1 << (add + i);
-      }
+      for (int i = 0; i < old; ++i) take(add + i, i);
     } else {
       const int drop = old - count;
-      for (int i = 0; i < count; ++i) {
-        const int src = drop + i;
-        if (src < static_cast<int>(event.frets.size())) frets[static_cast<size_t>(i)] = event.frets[static_cast<size_t>(src)];
-        if (src < 16 && (event.attacks & (1 << src))) attacks |= 1 << i;
-      }
+      for (int i = 0; i < count; ++i) take(i, drop + i);
     }
     event.frets = std::move(frets);
+    event.marks = std::move(marks);
+    event.bends = std::move(bends);
     event.attacks = attacks;
   }
   dropEmpty();
@@ -175,12 +211,17 @@ bool TabDocument::setCell(double qn, int stringIndex, int fret) {
   for (TabEvent& event : events) {
     if (std::abs(event.qn - snapped) > step * 0.25) continue;
     if (static_cast<int>(event.frets.size()) != stringCount) event.frets.assign(static_cast<size_t>(stringCount), -1);
+    fitMarks(event, stringCount);
     const int current = event.frets[static_cast<size_t>(stringIndex)];
     const bool attacked = (event.attacks & (1 << stringIndex)) != 0;
     if (current == fret && (fret < 0 || attacked)) return false;
     event.frets[static_cast<size_t>(stringIndex)] = fret;
     if (fret >= 0) event.attacks |= 1 << stringIndex;
-    else event.attacks &= ~(1 << stringIndex);
+    else {
+      event.attacks &= ~(1 << stringIndex);
+      event.marks[static_cast<size_t>(stringIndex)] = 0;
+      event.bends[static_cast<size_t>(stringIndex)] = 0;
+    }
     dropEmpty();
     return true;
   }
@@ -190,10 +231,35 @@ bool TabDocument::setCell(double qn, int stringIndex, int fret) {
   event.qn = snapped;
   event.qnDuration = step;
   event.frets.assign(static_cast<size_t>(stringCount), -1);
+  event.marks.assign(static_cast<size_t>(stringCount), 0);
+  event.bends.assign(static_cast<size_t>(stringCount), 0);
   event.frets[static_cast<size_t>(stringIndex)] = fret;
   event.attacks = 1 << stringIndex;
   events.push_back(std::move(event));
   sortEvents();
+  return true;
+}
+
+bool TabDocument::setMark(double qn, int stringIndex, uint32_t bit, bool on) {
+  if (stringIndex < 0 || stringIndex >= stringCount || bit == 0 || (bit & (bit - 1)) != 0 || bit > kMarkRake) return false;
+  TabEvent* event = eventAt(*this, qn);
+  if (!event || stringIndex >= static_cast<int>(event->frets.size()) || event->frets[static_cast<size_t>(stringIndex)] < 0) return false;
+  fitMarks(*event, stringCount);
+  uint32_t mask = event->marks[static_cast<size_t>(stringIndex)];
+  if (on) mask = withRivalCleared(mask | bit, bit);
+  else mask &= ~bit;
+  if (mask == event->marks[static_cast<size_t>(stringIndex)]) return false;
+  event->marks[static_cast<size_t>(stringIndex)] = mask;
+  return true;
+}
+
+bool TabDocument::setBend(double qn, int stringIndex, int quarters) {
+  if (stringIndex < 0 || stringIndex >= stringCount || !knownBend(quarters)) return false;
+  TabEvent* event = eventAt(*this, qn);
+  if (!event || stringIndex >= static_cast<int>(event->frets.size()) || event->frets[static_cast<size_t>(stringIndex)] < 0) return false;
+  fitMarks(*event, stringCount);
+  if (event->bends[static_cast<size_t>(stringIndex)] == quarters) return false;
+  event->bends[static_cast<size_t>(stringIndex)] = quarters;
   return true;
 }
 
@@ -221,6 +287,7 @@ void TabDocument::replaceRange(double qn0, double qn1, std::vector<TabEvent> fre
     if (static_cast<int>(event.frets.size()) != stringCount) {
       event.frets.resize(static_cast<size_t>(stringCount), -1);
     }
+    fitMarks(event, stringCount);
     if (!eventEmpty(event)) events.push_back(std::move(event));
   }
   sortEvents();
@@ -254,11 +321,19 @@ Json toJson(const TabDocument& doc) {
   Json events = Json::array();
   for (const TabEvent& event : doc.events) {
     Json frets = Json::array();
-    for (int fret : event.frets) frets.push(Json::number(fret));
+    Json marks = Json::array();
+    Json bends = Json::array();
+    for (size_t i = 0; i < event.frets.size(); ++i) {
+      frets.push(Json::number(event.frets[i]));
+      marks.push(Json::number(i < event.marks.size() ? event.marks[i] : 0));
+      bends.push(Json::number(i < event.bends.size() ? event.bends[i] : 0));
+    }
     Json item = Json::object();
     item.set("qn", Json::number(event.qn));
     item.set("d", Json::number(event.qnDuration));
     item.set("f", std::move(frets));
+    item.set("k", std::move(marks));
+    item.set("bn", std::move(bends));
     item.set("a", Json::number(event.attacks));
     events.push(std::move(item));
   }
@@ -297,11 +372,25 @@ TabDocument fromJson(const Json& value) {
       event.qnDuration = item.number("d", divisionStep(doc.division));
       event.attacks = item.integer("a", 0);
       event.frets.assign(static_cast<size_t>(doc.stringCount), -1);
+      event.marks.assign(static_cast<size_t>(doc.stringCount), 0);
+      event.bends.assign(static_cast<size_t>(doc.stringCount), 0);
       if (const std::vector<Json>* frets = item.array("f")) {
         for (size_t i = 0; i < frets->size() && i < event.frets.size(); ++i) {
           if ((*frets)[i].type == Json::Type::Number) {
             event.frets[i] = std::clamp(static_cast<int>(std::llround((*frets)[i].num)), -1, 24);
           }
+        }
+      }
+      if (const std::vector<Json>* marks = item.array("k")) {
+        for (size_t i = 0; i < marks->size() && i < event.marks.size(); ++i) {
+          if ((*marks)[i].type == Json::Type::Number) event.marks[i] = static_cast<uint32_t>(std::llround((*marks)[i].num)) & kMarkAll;
+        }
+      }
+      if (const std::vector<Json>* bends = item.array("bn")) {
+        for (size_t i = 0; i < bends->size() && i < event.bends.size(); ++i) {
+          if ((*bends)[i].type != Json::Type::Number) continue;
+          const int quarters = static_cast<int>(std::llround((*bends)[i].num));
+          event.bends[i] = knownBend(quarters) ? quarters : 0;
         }
       }
       if (!eventEmpty(event)) doc.events.push_back(std::move(event));
