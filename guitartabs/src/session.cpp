@@ -359,6 +359,11 @@ void Session::onMessage(const std::string& text) {
     redo();
     return;
   }
+  if (type == "play") {
+    if (Main_OnCommandEx) Main_OnCommandEx(40044, 0, static_cast<ReaProject*>(project_));
+    pushTransport();
+    return;
+  }
   if (phase_ != Phase::Idle && type != "ready") {
     if (type == "detect") pushStatus(phase_ == Phase::Reading ? "reading" : "detecting", 0, "Detection is already running");
     return;
@@ -400,6 +405,27 @@ void Session::onMessage(const std::string& text) {
         }
       }
     }
+  } else if (type == "duplicate") {
+    std::vector<NoteRef> cells;
+    if (const std::vector<Json>* list = message.array("cells")) {
+      for (const Json& cell : *list) cells.push_back(NoteRef{cell.number("qn", 0), cell.integer("string", -1)});
+    }
+    changed = doc_.duplicateNotes(cells);
+  } else if (type == "pasteNotes") {
+    std::vector<PastedNote> notes;
+    if (const std::vector<Json>* list = message.array("notes")) {
+      for (const Json& item : *list) {
+        PastedNote note;
+        note.qn = item.number("qn", 0);
+        note.stringIndex = item.integer("string", -1);
+        note.fret = item.integer("fret", -1);
+        note.mark = static_cast<uint32_t>(item.integer("k", 0));
+        note.bend = item.integer("bn", 0);
+        note.attack = item.boolean("a", true);
+        notes.push_back(note);
+      }
+    }
+    changed = doc_.pasteNotes(notes);
   } else if (type == "clearCells") {
     if (const std::vector<Json>* cells = message.array("cells")) {
       for (const Json& cell : *cells) {

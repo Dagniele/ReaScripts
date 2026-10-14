@@ -91,6 +91,34 @@ int main() {
   CHECK(marks.events[0].bends[1] == 4);
   CHECK(marks.events[0].marks[0] == 0);
 
+  guitartabs::TabDocument copies = guitartabs::TabDocument::makeDefault();
+  copies.setDivision(8);
+  CHECK(copies.setCell(0.0, 0, 3));
+  CHECK(copies.setCell(0.0, 1, 5));
+  CHECK(copies.setMark(0.0, 0, guitartabs::kMarkPalm, true));
+  CHECK(copies.setBend(0.0, 1, 2));
+  CHECK(copies.duplicateNotes({{0.0, 0}, {0.0, 1}}));
+  CHECK(copies.events.size() == 2);
+  CHECK(std::abs(copies.events[1].qn - 0.5) < 1e-6);
+  CHECK(copies.events[1].frets[0] == 3);
+  CHECK(copies.events[1].marks[0] & guitartabs::kMarkPalm);
+  CHECK(copies.events[1].frets[1] == 5);
+  CHECK(copies.events[1].bends[1] == 2);
+  CHECK(copies.events[0].frets[0] == 3);
+  CHECK(copies.setCell(1.0, 2, 7));
+  CHECK(copies.duplicateNotes({{0.0, 0}, {1.0, 2}}));
+  const auto at = [&](double qn) -> const guitartabs::TabEvent* {
+    for (const guitartabs::TabEvent& event : copies.events) {
+      if (std::abs(event.qn - qn) < 1e-6) return &event;
+    }
+    return nullptr;
+  };
+  CHECK(at(1.5) && at(1.5)->frets[0] == 3);
+  CHECK(at(2.5) && at(2.5)->frets[2] == 7);
+  CHECK(copies.pasteNotes({{4.0, 3, 9, guitartabs::kMarkTap, 0, true}}));
+  CHECK(at(4.0) && at(4.0)->frets[3] == 9);
+  CHECK(at(4.0)->marks[3] & guitartabs::kMarkTap);
+
   CHECK(guitartabs::parse("{\"ok\":true,\"n\":1.5}").boolean("ok", false));
   CHECK(std::abs(guitartabs::parse("{\"ok\":true,\"n\":1.5}").number("n", 0) - 1.5) < 1e-9);
 

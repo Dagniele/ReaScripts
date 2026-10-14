@@ -78,9 +78,15 @@ function TechniqueChooser({ mark, onBit, onBend }) {
   );
 }
 
-function TechniqueBar({ marks, onBit, onBend }) {
+function TechniqueBar({ marks, onBit, onBend, onDuplicate, onCopy }) {
   return (
     <div className="techbar" role="toolbar" aria-label="Techniques for the selected notes">
+      <button type="button" className="action" title="Repeat the selection on the next grid division" onClick={onDuplicate}>
+        Duplicate
+      </button>
+      <button type="button" className="action" title="Copy selected notes" onClick={onCopy}>
+        Copy
+      </button>
       {GROUPS.flatMap((group) => group.items).map((item) => {
         const on = item.bend != null ? marks.every((mark) => mark.bend === item.bend) : marks.every((mark) => (mark.tech & item.bit) !== 0);
         return (
@@ -124,7 +130,10 @@ export default function App() {
   const [follow, setFollow] = useState(true);
   const [pxPerQn, setPxPerQn] = useState(72);
   const [selected, setSelected] = useState([]);
+  const [clipboard, setClipboard] = useState([]);
+  const [caretQn, setCaretQn] = useState(null);
   const transportRef = useRef(null);
+  const pendingSelect = useRef(null);
   const mapRef = useRef(map);
   const footerKey = useRef("");
 
@@ -138,7 +147,7 @@ export default function App() {
       onTransport: (next) => {
         transportRef.current = next;
         const place = barBeat(next.playQn, mapRef.current.measures);
-        const key = `${place.bar}.${place.beat}|${Math.round(next.bpm)}|${next.hasSel}|${next.playing}`;
+        const key = `${place.bar}.${place.beat}|${Math.round(next.bpm)}|${next.hasSel}|${next.playing}|${next.paused}`;
         if (key !== footerKey.current) {
           footerKey.current = key;
           setTransport(next);
@@ -150,11 +159,72 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (pendingSelect.current) {
+      const wanted = pendingSelect.current;
+      pendingSelect.current = null;
+      setSelected(wanted.filter((note) => noteExists(doc, note)));
+      return;
+    }
     setSelected((current) => {
       const next = current.filter((note) => noteExists(doc, note));
       return next.length === current.length ? current : next;
     });
   }, [doc]);
+
+  function taken(note) {
+    const event = eventAt(doc, note.qn);
+    const fret = event?.f?.[note.string];
+    if (!event || fret == null || fret < 0) return null;
+    return {
+      qn: event.qn,
+      string: note.string,
+      fret,
+      k: event.k?.[note.string] || 0,
+      bn: event.bn?.[note.string] || 0,
+      a: ((event.a || 0) & (1 << note.string)) !== 0,
+    };
+  }
+
+  function copySelection() {
+    const notes = selected.map(taken).filter(Boolean);
+    if (!notes.length) return;
+    const origin = Math.min(...notes.map((note) => note.qn));
+    setClipboard(notes.map((note) => ({ ...note, dq: note.qn - origin })));
+  }
+
+  function pasteAt(qn) {
+    if (!clipboard.length || !doc) return;
+    const step = 4 / (doc.division || 8);
+    const target = Math.max(0, Math.floor((qn || 0) / step + 1e-6) * step);
+    const notes = clipboard.map((note) => ({
+      qn: target + note.dq,
+      string: note.string,
+      fret: note.fret,
+      k: note.k,
+      bn: note.bn,
+      a: note.a !== false,
+    }));
+    pendingSelect.current = notes.map((note) => ({ qn: note.qn, string: note.string }));
+    setEditor(null);
+    post({ type: "pasteNotes", notes });
+  }
+
+  function duplicateSelection() {
+    const notes = selected.map(taken).filter(Boolean);
+    if (!notes.length || !doc) return;
+    const step = 4 / (doc.division || 8);
+    const min = Math.min(...notes.map((note) => note.qn));
+    const max = Math.max(...notes.map((note) => note.qn));
+    const offset = max - min + step;
+    pendingSelect.current = notes.map((note) => ({ qn: note.qn + offset, string: note.string }));
+    post({ type: "duplicate", cells: notes.map((note) => ({ qn: note.qn, string: note.string })) });
+  }
+
+  function pasteTarget() {
+    if (editor) return editor.qn;
+    if (caretQn != null) return caretQn;
+    return transportRef.current?.playQn || 0;
+  }
 
   useEffect(() => {
     const onKey = (event) => {
@@ -162,9 +232,29 @@ export default function App() {
       const target = event.target;
       const typing = target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT");
       const meta = event.metaKey || event.ctrlKey;
+      if (event.code === "Space" && target?.tagName !== "SELECT" && target?.tagName !== "TEXTAREA") {
+        event.preventDefault();
+        post({ type: "play" });
+        return;
+      }
       if (meta && event.key.toLowerCase() === "z") {
         event.preventDefault();
         post({ type: event.shiftKey ? "redo" : "undo" });
+        return;
+      }
+      if (meta && event.key.toLowerCase() === "c" && !typing) {
+        event.preventDefault();
+        copySelection();
+        return;
+      }
+      if (meta && event.key.toLowerCase() === "v" && !typing) {
+        event.preventDefault();
+        pasteAt(pasteTarget());
+        return;
+      }
+      if (meta && event.key.toLowerCase() === "d" && !typing) {
+        event.preventDefault();
+        duplicateSelection();
         return;
       }
       if (typing || editor) return;
@@ -176,7 +266,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [editor, selected]);
+  }, [editor, selected, clipboard, caretQn, doc]);
 
   const place = useMemo(() => barBeat(transport?.playQn || 0, map.measures), [transport, map.measures]);
   const busy = status.phase === "reading" || status.phase === "detecting";
@@ -218,6 +308,15 @@ export default function App() {
           <span>{doc?.trackName || "Waiting for a track"}</span>
         </div>
         <div className="controls">
+          <button
+            className={transport?.playing && !transport?.paused ? "play on" : "play"}
+            onClick={() => post({ type: "play" })}
+          >
+            {transport?.playing && !transport?.paused ? "Stop" : "Play"}
+          </button>
+          <button className="ghost" disabled={!clipboard.length} onClick={() => pasteAt(pasteTarget())}>
+            Paste
+          </button>
           <div className="segment" aria-label="String count">
             {[4, 5, 6, 7, 8].map((count) => (
               <button key={count} className={doc?.strings === count ? "active" : ""} onClick={() => post({ type: "setStringCount", count })}>
@@ -337,6 +436,7 @@ export default function App() {
             setSelected(notes);
           }}
           onCell={(hit, x, y) => {
+            setCaretQn(hit.qn);
             setSelected([]);
             setEditor({ ...hit, x: Math.min(x, window.innerWidth - 300), y: Math.min(y, window.innerHeight - 520) });
             setDraft(currentFret(doc, hit.qn, hit.string));
@@ -347,6 +447,8 @@ export default function App() {
             marks={selected.map((note) => cellMark(doc, note.qn, note.string))}
             onBit={(bit, on) => post({ type: "setMark", cells: selected, bit, on })}
             onBend={(bend) => post({ type: "setMark", cells: selected, bend })}
+            onDuplicate={duplicateSelection}
+            onCopy={copySelection}
           />
         )}
       </div>
@@ -362,7 +464,8 @@ export default function App() {
           {doc ? `${doc.strings} strings · ${doc.preset}` : ""}
         </div>
         <div className={status.phase === "error" || status.phase === "empty" ? "status-pill warn" : "status-pill"}>
-          {status.detail || `${gestureLabel(doc?.marquee)} selects notes. Click one to add a slide, bend, or palm mute.`}
+          {status.detail ||
+            `${gestureLabel(doc?.marquee)} selects notes. Duplicate repeats them on the grid. ⌘C and ⌘V paste anywhere. Space plays.`}
         </div>
       </footer>
       {confirm && (

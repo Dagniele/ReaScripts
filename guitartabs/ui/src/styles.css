@@ -111,7 +111,18 @@ button { cursor: pointer; }
   letter-spacing: -0.01em;
 }
 
-.detect:disabled { opacity: 0.55; cursor: progress; }
+.detect:disabled, .ghost:disabled { opacity: 0.4; cursor: default; }
+
+.play {
+  border: 0;
+  border-radius: 999px;
+  padding: 8px 14px;
+  background: #1c3a34;
+  color: var(--play);
+  font-weight: 650;
+}
+
+.play.on { background: var(--play); color: #06241c; }
 
 .detect.busy {
   background: linear-gradient(90deg, var(--copper-deep), var(--copper));
@@ -293,6 +304,12 @@ button { cursor: pointer; }
 .chips button.on, .techbar button.on {
   background: #3a2a22;
   color: var(--ink);
+}
+
+.techbar button.action {
+  background: transparent;
+  color: var(--ink);
+  border: 1px solid var(--line);
 }
 
 .techbar {

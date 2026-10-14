@@ -43,6 +43,20 @@ struct TabEvent {
   int attacks = 0;
 };
 
+struct NoteRef {
+  double qn = 0;
+  int stringIndex = -1;
+};
+
+struct PastedNote {
+  double qn = 0;
+  int stringIndex = -1;
+  int fret = -1;
+  uint32_t mark = 0;
+  int bend = 0;
+  bool attack = true;
+};
+
 struct Preset {
   std::string name;
   std::vector<int> notes;
@@ -65,6 +79,8 @@ struct TabDocument {
   bool setCell(double qn, int stringIndex, int fret);
   bool setMark(double qn, int stringIndex, uint32_t bit, bool on);
   bool setBend(double qn, int stringIndex, int quarters);
+  bool duplicateNotes(const std::vector<NoteRef>& cells);
+  bool pasteNotes(const std::vector<PastedNote>& notes);
   int countInRange(double qn0, double qn1) const;
   int clearRange(double qn0, double qn1);
   void replaceRange(double qn0, double qn1, std::vector<TabEvent> fresh);

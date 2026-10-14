@@ -263,6 +263,76 @@ bool TabDocument::setBend(double qn, int stringIndex, int quarters) {
   return true;
 }
 
+bool TabDocument::pasteNotes(const std::vector<PastedNote>& notes) {
+  bool changed = false;
+  const double step = divisionStep(division);
+  for (const PastedNote& note : notes) {
+    if (note.stringIndex < 0 || note.stringIndex >= stringCount || note.fret < 0 || note.fret > 24) continue;
+    const double snapped = std::max(0.0, std::floor(note.qn / step + 1e-6) * step);
+    if (!eventAt(*this, snapped)) {
+      TabEvent created;
+      created.qn = snapped;
+      created.qnDuration = step;
+      created.frets.assign(static_cast<size_t>(stringCount), -1);
+      created.marks.assign(static_cast<size_t>(stringCount), 0);
+      created.bends.assign(static_cast<size_t>(stringCount), 0);
+      events.push_back(std::move(created));
+      sortEvents();
+    }
+    TabEvent* event = eventAt(*this, snapped);
+    if (!event) continue;
+    fitMarks(*event, stringCount);
+    const size_t index = static_cast<size_t>(note.stringIndex);
+    const uint32_t mark = note.mark & kMarkAll;
+    const int bend = knownBend(note.bend) ? note.bend : 0;
+    const bool attacked = note.attack;
+    const bool sameFret = event->frets[index] == note.fret;
+    const bool sameMark = event->marks[index] == mark && event->bends[index] == bend;
+    const bool sameAttack = ((event->attacks & (1 << note.stringIndex)) != 0) == attacked;
+    if (sameFret && sameMark && sameAttack) continue;
+    event->frets[index] = note.fret;
+    event->marks[index] = mark;
+    event->bends[index] = bend;
+    if (attacked) event->attacks |= 1 << note.stringIndex;
+    else event->attacks &= ~(1 << note.stringIndex);
+    changed = true;
+  }
+  return changed;
+}
+
+bool TabDocument::duplicateNotes(const std::vector<NoteRef>& cells) {
+  std::vector<PastedNote> copies;
+  double minQn = 0;
+  double maxQn = 0;
+  for (const NoteRef& cell : cells) {
+    if (cell.stringIndex < 0 || cell.stringIndex >= stringCount) continue;
+    TabEvent* event = eventAt(*this, cell.qn);
+    if (!event || cell.stringIndex >= static_cast<int>(event->frets.size())) continue;
+    const int fret = event->frets[static_cast<size_t>(cell.stringIndex)];
+    if (fret < 0) continue;
+    fitMarks(*event, stringCount);
+    if (copies.empty()) {
+      minQn = event->qn;
+      maxQn = event->qn;
+    } else {
+      minQn = std::min(minQn, event->qn);
+      maxQn = std::max(maxQn, event->qn);
+    }
+    PastedNote copy;
+    copy.qn = event->qn;
+    copy.stringIndex = cell.stringIndex;
+    copy.fret = fret;
+    copy.mark = event->marks[static_cast<size_t>(cell.stringIndex)];
+    copy.bend = event->bends[static_cast<size_t>(cell.stringIndex)];
+    copy.attack = (event->attacks & (1 << cell.stringIndex)) != 0;
+    copies.push_back(copy);
+  }
+  if (copies.empty()) return false;
+  const double offset = (maxQn - minQn) + divisionStep(division);
+  for (PastedNote& copy : copies) copy.qn += offset;
+  return pasteNotes(copies);
+}
+
 int TabDocument::countInRange(double qn0, double qn1) const {
   int count = 0;
   for (const TabEvent& event : events) {

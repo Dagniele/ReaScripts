@@ -153,10 +153,10 @@ export function startDemo(nextHandlers) {
   push();
   handlers.onMap({ measures: measures(), endQn: 64 });
   handlers.onStatus({ phase: "idle", progress: 0, detail: "Preview" });
-  const started = performance.now();
+  let lastStamp = 0;
   const tick = (now) => {
-    if (playing) playQn = ((now - started) / 1000) * (96 / 60);
-    playQn = playQn % 64;
+    if (lastStamp && playing) playQn = (playQn + ((now - lastStamp) / 1000) * (96 / 60)) % 64;
+    lastStamp = now;
     handlers.onTransport({
       playTime: playQn * 0.5,
       playQn,
@@ -174,8 +174,50 @@ export function startDemo(nextHandlers) {
   requestAnimationFrame(tick);
 }
 
+function applyCopied(notes) {
+  const step = 4 / state.division;
+  let touched = false;
+  for (const note of notes) {
+    if (note.string < 0 || note.string >= state.strings || note.fret < 0 || note.fret > 24) continue;
+    const snapped = Math.max(0, Math.floor(note.qn / step + 1e-6) * step);
+    let event = state.events.find((item) => Math.abs(item.qn - snapped) < step * 0.25);
+    if (!event) {
+      event = {
+        qn: snapped,
+        d: step,
+        f: Array(state.strings).fill(-1),
+        k: Array(state.strings).fill(0),
+        bn: Array(state.strings).fill(0),
+        a: 0,
+      };
+      state.events.push(event);
+    }
+    if (!event.k) event.k = Array(state.strings).fill(0);
+    if (!event.bn) event.bn = Array(state.strings).fill(0);
+    const attack = note.a !== false;
+    const same =
+      event.f[note.string] === note.fret &&
+      (event.k[note.string] || 0) === (note.k || 0) &&
+      (event.bn[note.string] || 0) === (note.bn || 0) &&
+      ((event.a & (1 << note.string)) !== 0) === attack;
+    if (same) continue;
+    event.f[note.string] = note.fret;
+    event.k[note.string] = note.k || 0;
+    event.bn[note.string] = note.bn || 0;
+    if (attack) event.a |= 1 << note.string;
+    else event.a &= ~(1 << note.string);
+    touched = true;
+  }
+  state.events.sort((a, b) => a.qn - b.qn);
+  return touched;
+}
+
 export function demoDispatch(message) {
   if (!state) return;
+  if (message.type === "play") {
+    playing = !playing;
+    return;
+  }
   if (message.type === "undo" && undo.length) {
     redo.push(clone(state));
     state = undo.pop();
@@ -271,6 +313,38 @@ export function demoDispatch(message) {
       touched = true;
     }
     if (!touched) {
+      undo.pop();
+      return;
+    }
+  } else if (message.type === "duplicate") {
+    const step = 4 / state.division;
+    const found = [];
+    for (const cell of message.cells || []) {
+      const qn = Math.floor(cell.qn / step + 1e-6) * step;
+      const event = state.events.find((item) => Math.abs(item.qn - qn) < step * 0.25);
+      if (!event || event.f[cell.string] == null || event.f[cell.string] < 0) continue;
+      found.push({
+        qn: event.qn,
+        string: cell.string,
+        fret: event.f[cell.string],
+        k: event.k?.[cell.string] || 0,
+        bn: event.bn?.[cell.string] || 0,
+        a: ((event.a || 0) & (1 << cell.string)) !== 0,
+      });
+    }
+    if (!found.length) {
+      undo.pop();
+      return;
+    }
+    const min = Math.min(...found.map((note) => note.qn));
+    const max = Math.max(...found.map((note) => note.qn));
+    const offset = max - min + step;
+    if (!applyCopied(found.map((note) => ({ ...note, qn: note.qn + offset })))) {
+      undo.pop();
+      return;
+    }
+  } else if (message.type === "pasteNotes") {
+    if (!applyCopied(message.notes || [])) {
       undo.pop();
       return;
     }
